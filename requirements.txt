@@ -1,0 +1,23 @@
+# Minimal requirements for ComplexPolarTransformer (adjust versions as needed)
+# Install with: python -m pip install -r requirements.txt
+
+# Core ML
+torch
+
+# Data & numerics
+numpy
+scipy
+pandas
+
+# Chemistry / SDF parsing
+rdkit-pypi
+
+# Utilities & plotting
+matplotlib
+scikit-learn
+pyyaml
+tqdm
+
+# Optional (add if used in your workflows)
+# seaborn
+# jupyter

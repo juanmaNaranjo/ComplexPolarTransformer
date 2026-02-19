@@ -1,0 +1,14 @@
+{
+  "model": "checkpoints/model_epoch_92.pt",
+  "sdf": "data/qm9.sdf",
+  "csv": "data/qm9_filtered_clean.csv",
+  "batch_size": 16,
+  "num_samples": 10000,
+  "metrics": {
+    "mse": 2004.3033618920858,
+    "rmse": 44.769446745432155,
+    "mae": 36.31463897895813,
+    "r2": 0.042723119548476185
+  },
+  "timestamp": "2026-02-19 17:55:19"
+}

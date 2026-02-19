@@ -1,0 +1,89 @@
+'''dataset:
+  sdf: "data/qm9.sdf"
+  csv: "data/qm9_filtered_clean.csv"
+  target: "u0"         # opcional, la columna que quieres predecir
+
+batch_size: 16
+validation_split: 0.1
+learning_rate: 0.001
+max_epochs: 1000
+
+model:
+  in_dim: 128         # depende de tu embedding de átomos
+  hidden_dim: 256
+  out_dim: 1
+'''
+
+
+
+
+'''import yaml
+import torch
+from torch.utils.data import DataLoader, random_split
+from models.complex_model_beta import ComplexPolarTransformerBeta
+from core.dataset import QM9SDFDataset
+from core.trainer import Trainer
+
+def collate_mol(batch):
+    """
+    Collate function para DataLoader que maneja batches de moléculas de distinto tamaño.
+    Retorna un diccionario de tensores/lists.
+    """
+    return {
+        "coords_cart": [item["coords_cart"] for item in batch],
+        "coords_spherical": [item["coords_spherical"] for item in batch],
+        "atom_types": [item["atom_types"] for item in batch],
+        "edge_index": [item["edge_index"] for item in batch],
+        "edge_attr": [item["edge_attr"] for item in batch],
+        "y": torch.stack([item["y"] for item in batch])
+    }
+
+if __name__ == "__main__":
+    # --- Cargar configuración YAML ---
+    cfg = yaml.safe_load(open("experiments/beta_train.yaml"))
+    dataset_cfg = cfg["dataset"]
+
+    # --- Inicializar dataset ---
+    dataset = QM9SDFDataset(
+        sdf_path=dataset_cfg["sdf"],
+        csv_path=dataset_cfg["csv"],
+        target_col=dataset_cfg.get("target", "u0")  # si no existe, QM9SDFDataset elegirá el primero disponible
+    )
+
+    # ---- Normalizar target ----
+    y_values = [item["y"] for item in dataset]
+    y_mean = torch.mean(torch.stack(y_values))
+    y_std = torch.std(torch.stack(y_values))
+    for item in dataset:
+        item["y"] = (item["y"] - y_mean) / y_std
+
+    # --- División train/val ---
+    n_total = len(dataset)
+    n_train = int(n_total * (1 - cfg["validation_split"]))
+    n_val = n_total - n_train
+    train_ds, val_ds = random_split(dataset, [n_train, n_val])
+
+    # --- DataLoaders ---
+    train_dl = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True, collate_fn=collate_mol)
+    val_dl = DataLoader(val_ds, batch_size=cfg["batch_size"], collate_fn=collate_mol)
+
+    # --- Inicializar modelo ---
+    model = ComplexPolarTransformerBeta(
+        in_dim=cfg["model"]["in_dim"],
+        hidden_dim=cfg["model"]["hidden_dim"],
+        out_dim=cfg["model"]["out_dim"]
+    )
+
+    # --- Inicializar entrenador ---
+    trainer = Trainer(
+        model=model,
+        train_dl=train_dl,
+        val_dl=val_dl,
+        lr=float(cfg["learning_rate"]),
+        max_epochs=cfg["max_epochs"],
+        ckpt_dir="checkpoints"
+    )
+
+    # --- Entrenamiento ---
+    trainer.fit()
+'''

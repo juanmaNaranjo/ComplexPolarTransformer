@@ -1,0 +1,33 @@
+dataset:
+  sdf: "data/qm9.sdf"
+  csv: "data/qm9_filtered_clean.csv"
+  targets: ["u0", "gap", "homo", "lumo"]
+
+sample_size: 10000
+seed: 42
+
+batch_size: 16
+validation_split: 0.1
+learning_rate: 0.001
+max_epochs: 300
+
+# 🔹 Early stopping
+early_stopping:
+  patience: 30          # épocas sin mejora antes de parar
+  min_delta: 0.0005     # mejora mínima en Val MSE para contar como progreso
+
+# 🔹 Learning rate scheduler
+scheduler:
+  name: reduce_on_plateau
+  factor: 0.5           # reduce LR a la mitad
+  patience: 10          # espera 10 épocas sin mejora
+  min_lr: 1e-5
+
+model:
+  in_dim: 5
+  hidden_dim: 256
+  out_dim: 1
+  num_hidden_layers: 2
+  dropout: 0.1
+  use_residuals: true
+  use_layernorm: true
