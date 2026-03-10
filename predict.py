@@ -24,15 +24,33 @@ def collate_mol(batch):
     }
 
 
+#def load_checkpoint(model_path, device):
+ #   if not os.path.exists(model_path):
+  #      raise FileNotFoundError(f"Checkpoint not found: {model_path}")
+   # ckpt = torch.load(model_path, map_location=device)
+    # If saved as full checkpoint dict
+    #if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+     #   state_dict = ckpt["model_state_dict"]
+    #else:
+     #   state_dict = ckpt
+    #return ckpt, state_dict
+
 def load_checkpoint(model_path, device):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Checkpoint not found: {model_path}")
+
     ckpt = torch.load(model_path, map_location=device)
-    # If saved as full checkpoint dict
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        state_dict = ckpt["model_state_dict"]
+
+    if isinstance(ckpt, dict):
+        if "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+        elif "model" in ckpt:
+            state_dict = ckpt["model"]   # 🔥 ESTA ES LA CLAVE
+        else:
+            state_dict = ckpt
     else:
         state_dict = ckpt
+
     return ckpt, state_dict
 
 

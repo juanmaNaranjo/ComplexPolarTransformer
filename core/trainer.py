@@ -51,14 +51,27 @@ class Trainer:
         # ============================
         # Normalización multi-target
         # ============================
+        # ============================
+        # Normalización del target (single o multi-target)
+        # ============================
         self.normalize_target = normalize_target
+
+        # inferir número de targets (T)
+        y0 = torch.as_tensor(self.train_dl.dataset[0]["y"]).float().view(-1)  # (T,)
+        self.num_targets = y0.numel()
+
         if self.normalize_target:
-            y_values = torch.stack([item["y"] for item in self.train_dl.dataset])
-            self.y_mean = y_values.mean(dim=0)          # 🔥 vector
-            self.y_std = y_values.std(dim=0) + 1e-9
+            y_list = []
+            for i in range(len(self.train_dl.dataset)):
+                yi = torch.as_tensor(self.train_dl.dataset[i]["y"]).float().view(-1)  # (T,)
+                y_list.append(yi)
+            y_values = torch.stack(y_list, dim=0)  # (N, T)
+
+            self.y_mean = y_values.mean(dim=0)  # (T,)
+            self.y_std = y_values.std(dim=0, unbiased=False).clamp_min(1e-9)  # (T,)
         else:
-            self.y_mean = 0.0
-            self.y_std = 1.0
+            self.y_mean = torch.zeros(self.num_targets, dtype=torch.float32)  # (T,)
+            self.y_std = torch.ones(self.num_targets, dtype=torch.float32)    # (T,)
 
         # ============================
         # Historial
@@ -76,9 +89,17 @@ class Trainer:
             writer.writerow(["epoch", "train_mse", "val_mse"])
 
     def _prepare_batch(self, batch):
-        y = batch["y"].to(self.device)
+        # y: garantizar float y shape (B, 1)
+        y = torch.as_tensor(batch["y"]).float().to(self.device)
+        if y.dim() == 0:
+            y = y.view(1, 1)
+        elif y.dim() == 1:
+            y = y.unsqueeze(-1)  # (B,) -> (B,1)
+
         if self.normalize_target:
-            y = (y - self.y_mean.to(self.device)) / self.y_std.to(self.device)
+            y_mean = self.y_mean.to(self.device)
+            y_std = self.y_std.to(self.device)
+            y = (y - y_mean) / y_std
 
         return {
             "atom_types": [x.to(self.device) for x in batch["atom_types"]],
@@ -92,7 +113,11 @@ class Trainer:
 
         for batch in self.train_dl:
             batch = self._prepare_batch(batch)
+
             pred = self.model(batch)
+            pred = torch.as_tensor(pred).float()
+            if pred.dim() == 1:
+                pred = pred.unsqueeze(-1)  # (B,) -> (B,1)
 
             loss = self.loss_fn(pred, batch["y"])
 
@@ -108,15 +133,18 @@ class Trainer:
         return total_loss / len(self.train_dl)
 
     def val_epoch(self):
-        self.model.eval()
+        self.model.eval() 
         total_loss = 0.0
         preds, targets = [], []
 
         with torch.no_grad():
             for batch in self.val_dl:
                 batch = self._prepare_batch(batch)
-                pred = self.model(batch)
 
+                pred = self.model(batch)
+                pred = torch.as_tensor(pred).float()
+                if pred.dim() == 1:
+                    pred = pred.unsqueeze(-1)  # (B,) -> (B,1)
                 loss = self.loss_fn(pred, batch["y"])
                 total_loss += loss.item()
 
