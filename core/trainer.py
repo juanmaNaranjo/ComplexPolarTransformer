@@ -29,7 +29,7 @@ class Trainer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
 
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
         self.loss_fn = torch.nn.MSELoss()
 
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -88,23 +88,26 @@ class Trainer:
             writer = csv.writer(f)
             writer.writerow(["epoch", "train_mse", "val_mse"])
 
+   
     def _prepare_batch(self, batch):
-        # y: garantizar float y shape (B, 1)
-        y = torch.as_tensor(batch["y"]).float().to(self.device)
-        if y.dim() == 0:
-            y = y.view(1, 1)
-        elif y.dim() == 1:
-            y = y.unsqueeze(-1)  # (B,) -> (B,1)
+       y = torch.as_tensor(batch["y"]).float().to(self.device)
+       if y.dim() == 0:
+           y = y.view(1, 1)
+       elif y.dim() == 1:
+           y = y.unsqueeze(-1)
 
-        if self.normalize_target:
-            y_mean = self.y_mean.to(self.device)
-            y_std = self.y_std.to(self.device)
-            y = (y - y_mean) / y_std
+       if self.normalize_target:
+           y_mean = self.y_mean.to(self.device)
+           y_std = self.y_std.to(self.device)
+           y = (y - y_mean) / y_std
 
-        return {
-            "atom_types": [x.to(self.device) for x in batch["atom_types"]],
-            "coords_spherical": [c.to(self.device) for c in batch["coords_spherical"]],
-            "y": y,
+       return {
+           "atom_types": [x.to(self.device) for x in batch["atom_types"]],
+           "coords_spherical": [c.to(self.device) for c in batch["coords_spherical"]],
+           "coords_cart": [cc.to(self.device) for cc in batch["coords_cart"]],
+           "edge_index": [ei.to(self.device) for ei in batch["edge_index"]],
+           "edge_attr": [ea.to(self.device) for ea in batch["edge_attr"]],
+           "y": y,
         }
 
     def train_epoch(self):

@@ -3,7 +3,7 @@ dataset:
   csv: "data/qm9_filtered_clean.csv"
   targets: ["u0", "gap", "homo", "lumo"]
 
-sample_size: 10000
+sample_size: 50000
 seed: 42
 
 batch_size: 16
