@@ -1,14 +1,14 @@
 {
-  "model": "checkpoints/best_model.pt",
+  "model": "checkpoints/model_epoch_45.pt",
   "sdf": "data/qm9.sdf",
   "csv": "data/qm9_filtered_clean.csv",
   "batch_size": 16,
   "num_samples": 10000,
   "metrics": {
-    "mse": 1485.7764442415173,
-    "rmse": 38.54577076984604,
-    "mae": 30.75751627998352,
-    "r2": 0.2903771621431548
+    "mse": 2879.355337350927,
+    "rmse": 53.65962483423572,
+    "mae": 40.59426267433167,
+    "r2": -0.3752111319359974
   },
-  "timestamp": "2026-03-09 12:48:29"
+  "timestamp": "2026-03-11 22:56:52"
 }

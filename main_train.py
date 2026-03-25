@@ -1,5 +1,6 @@
 import os
 import yaml
+from core.collate import pyg_collate
 import torch
 from torch.utils.data import DataLoader, random_split, Subset
 from models.complex_model_beta import ComplexPolarTransformerBeta
@@ -66,14 +67,26 @@ if __name__ == "__main__":
     set_seed(seed)
 
     # ============================
-    # 5) Split train/val
+    # 5) Split train / val / test  (80 / 10 / 10)
     # ============================
     n_total = len(dataset)
-    n_train = int(n_total * (1 - cfg["validation_split"]))
-    n_val = n_total - n_train
+    n_test  = int(n_total * 0.10)
+    n_val   = int(n_total * 0.10)
+    n_train = n_total - n_val - n_test
 
-    train_ds, val_ds = random_split(dataset, [n_train, n_val])
-    print(f"[INFO] Train: {n_train} | Val: {n_val}")
+    train_ds, val_ds, test_ds = random_split(
+        dataset,
+        [n_train, n_val, n_test],
+        generator=torch.Generator().manual_seed(seed)
+    )
+    print(f"[INFO] Train: {n_train} | Val: {n_val} | Test: {n_test}")
+
+    # Guardar índices del test para reproducibilidad
+    import json, os
+    os.makedirs("checkpoints", exist_ok=True)
+    with open("checkpoints/test_indices.json", "w") as f:
+        json.dump(test_ds.indices, f)
+    print("[INFO] Índices de test guardados en checkpoints/test_indices.json")
 
     # ============================
     # 6) DataLoaders
@@ -85,7 +98,7 @@ if __name__ == "__main__":
         train_ds,
         batch_size=cfg["batch_size"],
         shuffle=True,
-        collate_fn=collate_mol,
+        collate_fn=pyg_collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
