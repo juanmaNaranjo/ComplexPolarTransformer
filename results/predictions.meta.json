@@ -1,14 +1,22 @@
 {
   "model": "checkpoints/best_model.pt",
   "sdf": "data/qm9.sdf",
-  "csv": "data/qm9_filtered_clean.csv",
+  "csv": "data/qm9.csv",
   "batch_size": 16,
   "num_samples": 50000,
   "metrics": {
-    "mse": 1026.5569447629755,
-    "rmse": 32.03992735264822,
-    "mae": 25.593434207229613,
-    "r2": 0.45942928891734147
+    "mse": 73.09769297042695,
+    "rmse": 8.549718882538007,
+    "mae": 5.760557871780396,
+    "r2": 0.9609203341462547
   },
-  "timestamp": "2026-03-15 14:04:59"
+  "performance": {
+    "inference_total_sec": 255.41976960003376,
+    "inference_ms_per_sample": 5.108395392000675,
+    "samples_per_sec": 195.75618629010538,
+    "param_count": 4865,
+    "model_size_mb": 0.018558502197265625,
+    "peak_gpu_mem_mb": 11.08203125
+  },
+  "timestamp": "2026-03-29 11:17:37"
 }

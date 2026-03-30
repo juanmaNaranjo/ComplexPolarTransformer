@@ -1,14 +1,14 @@
 dataset:
   sdf: "data/qm9.sdf"
-  csv: "data/qm9_filtered_clean.csv"
+  csv: "data/qm9.csv"
   targets: ["u0", "gap", "homo", "lumo"]
 
 sample_size: 50000
 seed: 42
 
-batch_size: 16
-validation_split: 0.1
-learning_rate: 0.001
+batch_size: 16          
+validation_split: 0.15  
+learning_rate: 0.0005   
 max_epochs: 300
 
 # 🔹 Early stopping
