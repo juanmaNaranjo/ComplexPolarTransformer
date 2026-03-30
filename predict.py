@@ -117,6 +117,17 @@ def predict(args):
     model.to(device)
     model.eval()
 
+    param_count = sum(p.numel() for p in model.parameters())
+    model_size_mb = sum(
+        p.numel() * p.element_size() for p in model.parameters()
+    ) / (1024 ** 2)
+
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+
+    t0 = time.perf_counter()
+
     # y normalization stats if available
     y_mean = float(ckpt.get("y_mean", 0.0)) if isinstance(ckpt, dict) else 0.0
     y_std = float(ckpt.get("y_std", 1.0)) if isinstance(ckpt, dict) else 1.0
@@ -151,6 +162,11 @@ def predict(args):
         if args.dry_run and idx >= args.dry_run:
             break
 
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    inference_total_sec = time.perf_counter() - t0
+
     # Métricas (filtrar NaNs)
     y_true_arr = np.array(y_trues)
     y_pred_arr = np.array(y_preds)
@@ -163,10 +179,25 @@ def predict(args):
     mae_val = mean_absolute_error(y_true_arr, y_pred_arr)
     r2 = r2_score(y_true_arr, y_pred_arr)
 
+    num_samples = int(len(y_true_arr))
+    inference_ms_per_sample = (inference_total_sec / max(num_samples, 1)) * 1000.0
+    samples_per_sec = num_samples / max(inference_total_sec, 1e-9)
+
+    peak_gpu_mem_mb = None
+    if device == "cuda":
+        peak_gpu_mem_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+
     print(f"MSE: {mse:.6f}")
     print(f"RMSE: {rmse:.6f}")
     print(f"MAE: {mae_val:.6f}")
     print(f"R2: {r2:.6f}")
+    print(f"Inference total time (s): {inference_total_sec:.6f}")
+    print(f"Latency per sample (ms): {inference_ms_per_sample:.6f}")
+    print(f"Throughput (samples/s): {samples_per_sec:.6f}")
+    print(f"Model params: {param_count:,}")
+    print(f"Model size (MB): {model_size_mb:.4f}")
+    if peak_gpu_mem_mb is not None:
+        print(f"Peak GPU memory (MB): {peak_gpu_mem_mb:.4f}")
 
     # Guardar predicciones
     out_df = pd.DataFrame({"idx": indices[:len(y_pred_arr)], "y_true": y_true_arr, "y_pred": y_pred_arr})
@@ -180,7 +211,20 @@ def predict(args):
         "csv": args.csv,
         "batch_size": args.batch_size,
         "num_samples": int(len(y_true_arr)),
-        "metrics": {"mse": float(mse), "rmse": float(rmse), "mae": float(mae_val), "r2": float(r2)},
+        "metrics": {
+            "mse": float(mse),
+            "rmse": float(rmse),
+            "mae": float(mae_val),
+            "r2": float(r2),
+        },
+        "performance": {
+            "inference_total_sec": float(inference_total_sec),
+            "inference_ms_per_sample": float(inference_ms_per_sample),
+            "samples_per_sec": float(samples_per_sec),
+            "param_count": int(param_count),
+            "model_size_mb": float(model_size_mb),
+            "peak_gpu_mem_mb": float(peak_gpu_mem_mb) if peak_gpu_mem_mb is not None else None,
+        },
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
     }
     meta_path = args.output.replace('.csv', '.meta.json') if args.output.endswith('.csv') else args.output + '.meta.json'

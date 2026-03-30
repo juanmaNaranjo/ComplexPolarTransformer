@@ -4,6 +4,7 @@ from rdkit import Chem
 import pandas as pd
 import numpy as np
 import math
+import time
 
 
 class QM9SDFDataset(Dataset):
@@ -57,6 +58,7 @@ class QM9SDFDataset(Dataset):
         return r, theta, phi
 
     def __getitem__(self, idx):
+        t0 = time.perf_counter()
         mol = self.mols[idx]
         conf = mol.GetConformer()
         num_atoms = mol.GetNumAtoms()
@@ -108,6 +110,9 @@ class QM9SDFDataset(Dataset):
 
         target = torch.tensor(float(self.df.iloc[idx][self.target_col]), dtype=torch.float32)
 
+        sample_build_time_sec = time.perf_counter() - t0
+        num_edges = edge_index.shape[1] if edge_index.numel() > 0 else 0
+
         return {
             "coords_cart": coords_cart,
             "coords_spherical": coords_sph,
@@ -115,4 +120,8 @@ class QM9SDFDataset(Dataset):
             "edge_index": edge_index,
             "edge_attr": edge_attr,
             "y": target,
+            "sample_build_time_sec": sample_build_time_sec,
+            "num_atoms": num_atoms,
+            "num_edges": num_edges,
         }
+ 
