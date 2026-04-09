@@ -1,55 +1,57 @@
+"""
+core/metrics.py
+ 
+Funciones de evaluación para regresión molecular.
+Diseñado para ser robusto ante NaN/Inf en predicciones desnormalizadas.
+"""
+ 
 import torch
-import torch.nn.functional as F
-
-
-def _align_shapes(pred: torch.Tensor, target: torch.Tensor):
+import math
+ 
+ 
+def evaluate_regression(preds: torch.Tensor, targets: torch.Tensor) -> dict:
     """
-    Alinea pred y target para evitar broadcasting silencioso.
-    Soporta (B,), (B,1), (B,T) y casos donde venga como listas/np.
+    Calcula MAE, RMSE y R² de forma robusta.
+ 
+    Args:
+        preds:   Tensor [N, 1] o [N] — predicciones desnormalizadas
+        targets: Tensor [N, 1] o [N] — targets desnormalizados
+ 
+    Returns:
+        dict con claves: mae, rmse, r2
+        Si hay NaN/Inf, los filtra antes de calcular.
     """
-    pred = torch.as_tensor(pred).float()
-    target = torch.as_tensor(target).float()
-
-    # Si ambos son 1D: (B,) ok
-    if pred.dim() == 2 and pred.size(-1) == 1:
-        pred = pred.view(-1)      # (B,1) -> (B,)
-    if target.dim() == 2 and target.size(-1) == 1:
-        target = target.view(-1)  # (B,1) -> (B,)
-
-    # Si target viene (B,) pero pred viene (B,T) con T>1 (multi-target),
-    # aquí NO lo forzamos: en ese caso debe venir target (B,T) desde el Trainer.
-    # Para single-target (T=1) ya quedó (B,).
-    return pred, target
-
-
-def mae(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    pred, target = _align_shapes(pred, target)
-    return torch.mean(torch.abs(pred - target))
-
-
-def rmse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    pred, target = _align_shapes(pred, target)
-    return torch.sqrt(F.mse_loss(pred, target))
-
-
-def mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    pred, target = _align_shapes(pred, target)
-    return F.mse_loss(pred, target)
-
-
-def r2_score(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    pred, target = _align_shapes(pred, target)
-    target_mean = torch.mean(target)
-    ss_tot = torch.sum((target - target_mean) ** 2)
-    ss_res = torch.sum((target - pred) ** 2)
-    return 1.0 - ss_res / (ss_tot + 1e-9)
-
-
-def evaluate_regression(pred: torch.Tensor, target: torch.Tensor) -> dict:
-    pred, target = _align_shapes(pred, target)
-    return {
-        "MAE": mae(pred, target).item(),
-        "RMSE": rmse(pred, target).item(),
-        "MSE": mse(pred, target).item(),
-        "R2": r2_score(pred, target).item(),
-    }
+    # Aplanar a [N]
+    preds   = preds.detach().float().view(-1)
+    targets = targets.detach().float().view(-1)
+ 
+    # Filtrar NaN e Inf — si existen, el modelo tiene un problema upstream
+    mask = torch.isfinite(preds) & torch.isfinite(targets)
+    if mask.sum() == 0:
+        # No hay ningún valor válido — reportar NaN con advertencia
+        return {"mae": float("nan"), "rmse": float("nan"), "r2": float("nan")}
+ 
+    if mask.sum() < len(mask):
+        n_bad = len(mask) - mask.sum().item()
+        print(f"[METRICS WARNING] {n_bad} muestras con NaN/Inf filtradas de {len(mask)} totales")
+ 
+    p = preds[mask]
+    t = targets[mask]
+ 
+    # MAE
+    mae = (p - t).abs().mean().item()
+ 
+    # RMSE
+    rmse = math.sqrt(((p - t) ** 2).mean().item())
+ 
+    # R² = 1 - SS_res / SS_tot
+    ss_res = ((p - t) ** 2).sum().item()
+    ss_tot = ((t - t.mean()) ** 2).sum().item()
+ 
+    if ss_tot < 1e-12:
+        # Todos los targets son iguales — R² indefinido
+        r2 = float("nan")
+    else:
+        r2 = 1.0 - ss_res / ss_tot
+ 
+    return {"mae": mae, "rmse": rmse, "r2": r2}
