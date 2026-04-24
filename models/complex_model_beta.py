@@ -7,6 +7,7 @@ from .complex_layers import (
 )
 import torch
 import torch.nn as nn
+import math
 
 
 class ComplexPolarTransformerBeta(nn.Module):
