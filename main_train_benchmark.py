@@ -192,6 +192,8 @@ if __name__ == "__main__":
         hidden_dim=cfg["model"]["hidden_dim"],
         out_dim=cfg["model"].get("out_dim", 1),
         num_hidden_layers=cfg["model"].get("num_hidden_layers", 1),
+        num_rbf=cfg["model"].get("num_rbf", 50),
+        cutoff=float(cfg["model"].get("cutoff", 5.0)),
         edge_dim=cfg["model"].get("edge_dim", 4),
         dropout=cfg["model"].get("dropout", 0.0),
         use_residuals=cfg["model"].get("use_residuals", False),

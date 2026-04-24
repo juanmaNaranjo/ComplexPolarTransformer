@@ -56,19 +56,26 @@ def build_model_from_ckpt(ckpt, state_dict, defaults=None):
         if "model" in h and isinstance(h["model"], dict):
             model_cfg.update(h["model"])
 
-    in_dim = int(model_cfg.get("in_dim", defaults["in_dim"]))
-    hidden_dim = int(model_cfg.get("hidden_dim", defaults["hidden_dim"]))
-    out_dim = int(model_cfg.get("out_dim", defaults["out_dim"]))
+    in_dim            = int(model_cfg.get("in_dim",            defaults["in_dim"]))
+    hidden_dim        = int(model_cfg.get("hidden_dim",        defaults["hidden_dim"]))
+    out_dim           = int(model_cfg.get("out_dim",           defaults["out_dim"]))
     num_hidden_layers = int(model_cfg.get("num_hidden_layers", 1))
-    dropout = float(model_cfg.get("dropout", 0.0))
-    use_residuals = bool(model_cfg.get("use_residuals", False))
-    use_layernorm = bool(model_cfg.get("use_layernorm", False))
+    dropout           = float(model_cfg.get("dropout",         0.0))
+    use_residuals     = bool(model_cfg.get("use_residuals",    False))
+    use_layernorm     = bool(model_cfg.get("use_layernorm",    False))
+    # Parámetros RBF — críticos para v6/v7 (num_rbf=150, cutoff=7.0)
+    num_rbf           = int(model_cfg.get("num_rbf",           50))
+    cutoff            = float(model_cfg.get("cutoff",          5.0))
+    edge_dim          = int(model_cfg.get("edge_dim",          4))
 
     model = ComplexPolarTransformerBeta(
         in_dim=in_dim,
         hidden_dim=hidden_dim,
         out_dim=out_dim,
         num_hidden_layers=num_hidden_layers,
+        num_rbf=num_rbf,
+        cutoff=cutoff,
+        edge_dim=edge_dim,
         dropout=dropout,
         use_residuals=use_residuals,
         use_layernorm=use_layernorm,
@@ -107,28 +114,23 @@ def convert_mae_units(mae_raw, unit):
     """
     Convierte MAE a meV y kcal/mol desde la unidad base.
     unit: 'hartree' | 'ev' | 'kcal' | 'mev'
-
-    NOTA para QM9: u0_atom en el CSV estándar está en kcal/mol.
-    Usar --unit kcal para obtener métricas correctas.
     """
     if unit == "hartree":
-        mae_ev   = mae_raw * HARTREE_TO_EV
-        mae_mev  = mae_ev  * EV_TO_MEV
+        mae_ev = mae_raw * HARTREE_TO_EV
+        mae_mev = mae_ev * EV_TO_MEV
         mae_kcal = mae_raw * HARTREE_TO_KCAL_MOL
         return mae_mev, mae_kcal
     if unit == "ev":
-        mae_mev  = mae_raw * EV_TO_MEV
+        mae_mev = mae_raw * EV_TO_MEV
         mae_kcal = (mae_raw / HARTREE_TO_EV) * HARTREE_TO_KCAL_MOL
         return mae_mev, mae_kcal
     if unit == "mev":
-        mae_mev  = mae_raw
+        mae_mev = mae_raw
         mae_kcal = ((mae_raw / EV_TO_MEV) / HARTREE_TO_EV) * HARTREE_TO_KCAL_MOL
         return mae_mev, mae_kcal
     if unit == "kcal":
-        # u0_atom ya está en kcal/mol — conversión directa sin factor Hartree
         mae_kcal = mae_raw
-        KCAL_TO_EV = 0.043363
-        mae_mev  = mae_kcal * KCAL_TO_EV * EV_TO_MEV
+        mae_mev = ((mae_raw / HARTREE_TO_KCAL_MOL) * HARTREE_TO_EV) * EV_TO_MEV
         return mae_mev, mae_kcal
     return None, None
 
@@ -184,7 +186,6 @@ def predict(args):
         y_std = torch.as_tensor(ckpt["y_std"]).float().view(-1).to(device)
         # single-target expected
         if y_mean.numel() != 1 or y_std.numel() != 1:
-            # Si el checkpoint es multi-target, toma el primer target (o falla)
             if args.force_first_target:
                 y_mean = y_mean[:1]
                 y_std = y_std[:1]
@@ -193,6 +194,11 @@ def predict(args):
     else:
         y_mean = torch.zeros(1, dtype=torch.float32, device=device)
         y_std = torch.ones(1, dtype=torch.float32, device=device)
+
+    # Leer si el modelo fue entrenado con normalización per-atom
+    per_atom_norm = isinstance(ckpt, dict) and ckpt.get("per_atom_norm", False)
+    if per_atom_norm:
+        print("[INFO] Checkpoint entrenado con per-atom normalization — desnormalizando por N_atoms")
 
     y_trues = []
     y_preds = []
@@ -215,6 +221,14 @@ def predict(args):
 
         # desnormalizar
         preds = preds * y_std + y_mean
+
+        # Si el modelo usó per-atom norm, multiplicar por N_atoms por molécula
+        if per_atom_norm:
+            n_atoms = torch.tensor(
+                [float(at.shape[0]) for at in batch["atom_types"]],
+                dtype=torch.float32, device=device
+            ).unsqueeze(-1)  # [B, 1]
+            preds = preds * n_atoms
 
         target = batch["y"].cpu().numpy()  # (B,1)
         preds_np = preds.cpu().numpy()     # (B,1)
@@ -265,20 +279,13 @@ def predict(args):
     # Conversion a unidades benchmark
     mae_mev, mae_kcal = convert_mae_units(mae_val, args.unit)
 
-    print(f"MSE:  {mse:.6f}")
-    print(f"RMSE: {rmse:.6f} [{args.unit}]")
-    print(f"MAE:  {mae_val:.6f} [{args.unit}]")
+    print(f"MSE: {mse:.6f}")
+    print(f"RMSE: {rmse:.6f}")
+    print(f"MAE (raw): {mae_val:.6f} [{args.unit}]")
     if mae_mev is not None and mae_kcal is not None:
-        print(f"MAE:  {mae_kcal:.4f} kcal/mol")
-        print(f"MAE:  {mae_mev:.2f} meV")
-        print(f"--- Benchmark QM9 u0_atom ---")
-        print(f"  NequIP:     0.0420 kcal/mol")
-        print(f"  TensorNet:  0.0580 kcal/mol")
-        print(f"  PaiNN:      0.1490 kcal/mol")
-        print(f"  SchNet:     0.3130 kcal/mol")
-        print(f"  MPNN:       0.3550 kcal/mol")
-        print(f"  Este modelo:{mae_kcal:8.4f} kcal/mol  (factor vs SchNet: {mae_kcal/0.3130:.1f}x)")
-    print(f"R2:   {r2:.6f}")
+        print(f"MAE (meV): {mae_mev:.3f}")
+        print(f"MAE (kcal/mol): {mae_kcal:.6f}")
+    print(f"R2: {r2:.6f}")
     print(f"Inference total time (s): {inference_total_sec:.6f}")
     print(f"Latency per sample (ms): {inference_ms_per_sample:.6f}")
     print(f"Throughput (samples/s): {samples_per_sec:.6f}")

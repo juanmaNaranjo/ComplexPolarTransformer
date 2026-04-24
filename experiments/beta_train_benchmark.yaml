@@ -1,37 +1,35 @@
-# experiments/beta_train.yaml (benchmark-ready: QM9 u0)
+# experiments/beta_train.yaml — ComplexPolarTransformer v7
+# Mejoras sobre v6:
+#   A. Normalización per-atom en trainer (elimina sesgo tamaño molecular)
+#   B. num_rbf: 50 → 150  (más resolución radial)
+#   C. cutoff: 5.0 → 7.0  (más vecinos por átomo)
+#   D. num_hidden_layers: 3 → 4  (más profundidad)
+#   E. grad_clip: 5.0 → 1.0  (en trainer, ya aplicado)
+
 dataset:
   sdf: "data/qm9.sdf"
   csv: "data/qm9.csv"
-  target: "u0_atom"          # benchmark: U0 (energy at 0K)
+  target: "u0_atom"
 
-# IMPORTANTE:
-# - Para comparar con el leaderboard, usa benchmark_split=true y sample_size: null
 benchmark_split: true
 sample_size: null
 seed: 42
 
-#sample_size: 50000
-#benchmark_split: false   # recomendado cuando usas sample_size
-#validation_split: 0.1 
-
-batch_size: 32
-num_workers: 4
-learning_rate: 0.0005
+batch_size: 64
+num_workers: 8
+learning_rate: 0.0002
 max_epochs: 300
 
-# Early stopping
 early_stopping:
-  patience: 40           # CAMBIO: 30→40 — modelo más profundo converge más lento
-  min_delta: 0.0001      # CAMBIO: más sensible para detectar mejoras pequeñas
+  patience: 40
+  min_delta: 0.0001
 
-# LR scheduler
 scheduler:
   name: reduce_on_plateau
-  factor: 0.5
-  patience: 10
+  factor: 0.7
+  patience: 15
   min_lr: 1e-5
 
-# Output paths
 ckpt_dir: "checkpoints"
 log_dir: "logs"
 split_path: "logs/split_seed42.json"
@@ -40,8 +38,10 @@ model:
   in_dim: 5
   hidden_dim: 256
   out_dim: 1
-  num_hidden_layers: 4   # CAMBIO: 2→4 capas para mayor profundidad representacional
+  num_hidden_layers: 3    # CAMBIO D: 3 → 4
+  num_rbf: 150            # CAMBIO B: 50 → 150
+  cutoff: 7.0             # CAMBIO C: 5.0 → 7.0
   edge_dim: 4
-  dropout: 0.1           # CAMBIO: 0.05→0.1 para regularizar modelo más profundo
+  dropout: 0.1
   use_residuals: true
-  use_layernorm: true    # CAMBIO: activado — necesario con 4 capas para estabilidad
+  use_layernorm: true

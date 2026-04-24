@@ -2,26 +2,26 @@
   "model": "checkpoints/best_model.pt",
   "sdf": "data/qm9.sdf",
   "csv": "data/qm9.csv",
-  "target": "U0\n",
+  "target": "u0_atom",
   "split_file": "logs/split_seed42.json",
   "split": "test",
   "batch_size": 16,
   "num_samples": 12197,
   "metrics": {
-    "mse": 3139739.75,
-    "rmse": 1771.9310793594655,
-    "mae_raw": 1755.8212890625,
-    "mae_mev": 76137.67855761718,
-    "mae_kcal_mol": 1755.8212890625,
-    "r2": -55582.86328125
+    "mse": 15.884859085083008,
+    "rmse": 3.9855813986271826,
+    "mae_raw": 2.918600559234619,
+    "mae_mev": 126.56249890354613,
+    "mae_kcal_mol": 2.918600559234619,
+    "r2": 0.9997231960296631
   },
   "performance": {
-    "inference_total_sec": 86.47810460004257,
-    "inference_ms_per_sample": 7.090112699847714,
-    "samples_per_sec": 141.04148161445707,
-    "param_count": 271113,
-    "model_size_mb": 1.0342140197753906,
-    "peak_gpu_mem_mb": 13.7841796875
+    "inference_total_sec": 216.77837289997842,
+    "inference_ms_per_sample": 17.773089522011844,
+    "samples_per_sec": 56.26483784721319,
+    "param_count": 1353223,
+    "model_size_mb": 5.162136077880859,
+    "peak_gpu_mem_mb": 22.38232421875
   },
   "split_meta": {
     "seed": 42,
@@ -132235,5 +132235,5 @@
       56941
     ]
   },
-  "timestamp": "2026-04-07 04:30:53"
+  "timestamp": "2026-04-23 21:21:49"
 }
