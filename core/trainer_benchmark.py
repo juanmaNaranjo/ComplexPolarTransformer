@@ -1,21 +1,40 @@
-import os
 import csv
-import time
 import math
-import torch
-import numpy as np
+import os
+import time
+from typing import Iterable, Optional, Tuple
+
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from torch.utils.data import Subset
+
 from core.metrics import evaluate_regression
 
 
 def _unwrap_subset(ds):
+    """
+    Devuelve (dataset_base, indices_en_dataset_base) para Subset anidados.
+    Si ds no es Subset, indices=None.
+    """
     indices = None
     base = ds
-    from torch.utils.data import Subset
+
     while isinstance(base, Subset):
-        indices = base.indices if indices is None else [base.indices[i] for i in indices]
+        current = list(base.indices)
+        if indices is None:
+            indices = current
+        else:
+            indices = [current[i] for i in indices]
         base = base.dataset
+
     return base, indices
+
+
+def _as_index_array(indices: Optional[Iterable], n_total: int) -> np.ndarray:
+    if indices is None:
+        return np.arange(n_total, dtype=np.int64)
+    return np.asarray(list(indices), dtype=np.int64)
 
 
 class Trainer:
@@ -30,8 +49,9 @@ class Trainer:
         ckpt_dir="checkpoints",
         log_dir="logs",
         normalize_target=True,
+        per_atom_norm=True,
         hparams: dict = None,
-        grad_clip=1.0,          # CAMBIO D: 5.0 → 1.0 (reduce outliers de gradiente)
+        grad_clip=1.0,
         patience=30,
         min_delta=5e-4,
         scheduler_cfg=None,
@@ -55,94 +75,124 @@ class Trainer:
 
         self.hparams = hparams or {}
         self.grad_clip = grad_clip
-
         self.best_val = float("inf")
         self.patience = patience
         self.min_delta = min_delta
         self.wait = 0
 
-        self.normalize_target = normalize_target
+        self.normalize_target = bool(normalize_target)
+        self.per_atom_norm = bool(per_atom_norm)
 
         y0 = torch.as_tensor(self.train_dl.dataset[0]["y"]).float().view(-1)
         self.num_targets = y0.numel()
 
         if self.normalize_target:
-            self.y_mean, self.y_std = self._compute_target_stats_fast()
+            self.y_mean, self.y_std = self._compute_target_stats_exact()
         else:
             self.y_mean = torch.zeros(self.num_targets, dtype=torch.float32)
-            self.y_std  = torch.ones(self.num_targets,  dtype=torch.float32)
+            self.y_std = torch.ones(self.num_targets, dtype=torch.float32)
 
-        # ============================================================
-        # CAMBIO A — Normalización per-atom
-        #
-        # Problema identificado: moléculas pequeñas (Q1) tienen 32%
-        # más error que grandes (Q4). Causa: el modelo predice
-        # u0_atom directamente sin saber cuántos átomos tiene la molécula.
-        #
-        # Solución: durante el entrenamiento, normalizamos el target
-        # dividiendo por N_átomos de esa molécula. Esto convierte
-        # u0_atom (energía total de atomización) en u0_atom_per_atom
-        # (energía de atomización por átomo), que tiene una distribución
-        # mucho más estrecha y uniforme entre moléculas de distinto tamaño.
-        #
-        # Al predecir, multiplicamos de vuelta por N_átomos.
-        #
-        # Referencia: SchNet [14] y la mayoría de modelos del benchmark
-        # usan esta normalización internamente.
-        #
-        # Nota: el flag per_atom_norm se activa automáticamente.
-        # Si el dataset no provee n_atoms, se desactiva sin error.
-        # ============================================================
-        self.per_atom_norm = False  # se activa en _prepare_batch si hay n_atoms
+        print(
+            f"[TARGET] normalize_target={self.normalize_target} | "
+            f"per_atom_norm={self.per_atom_norm} | "
+            f"y_mean={self.y_mean.tolist()} | y_std={self.y_std.tolist()}"
+        )
 
         self.scheduler = None
         if isinstance(scheduler_cfg, dict) and scheduler_cfg.get("name", "") == "reduce_on_plateau":
-            factor   = float(scheduler_cfg.get("factor",   0.5))
-            patience = int(scheduler_cfg.get("patience",   10))
-            min_lr   = float(scheduler_cfg.get("min_lr",   1e-5))
+            factor = float(scheduler_cfg.get("factor", 0.5))
+            sched_patience = int(scheduler_cfg.get("patience", 10))
+            min_lr = float(scheduler_cfg.get("min_lr", 1e-5))
             self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer, mode="min", factor=factor, patience=patience, min_lr=min_lr
+                self.optimizer, mode="min", factor=factor, patience=sched_patience, min_lr=min_lr
             )
 
-        self.param_count   = sum(p.numel() for p in self.model.parameters())
+        self.param_count = sum(p.numel() for p in self.model.parameters())
         self.model_size_mb = sum(p.numel() * p.element_size() for p in self.model.parameters()) / (1024 ** 2)
 
         self.history = {
-            "epoch": [], "train_mse": [], "val_mse": [],
-            "epoch_time_sec": [], "train_samples_per_sec": [],
-            "val_samples_per_sec": [], "peak_gpu_mem_mb": [], "lr": [],
+            "epoch": [],
+            "train_mse": [],
+            "val_mse": [],
+            "epoch_time_sec": [],
+            "train_samples_per_sec": [],
+            "val_samples_per_sec": [],
+            "peak_gpu_mem_mb": [],
+            "lr": [],
         }
 
         self.csv_path = os.path.join(self.log_dir, "training_log.csv")
-        with open(self.csv_path, "w", newline="") as f:
+        with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([
-                "epoch", "train_mse", "val_mse", "epoch_time_sec",
-                "train_samples_per_sec", "val_samples_per_sec",
-                "peak_gpu_mem_mb", "lr",
+                "epoch",
+                "train_mse",
+                "val_mse",
+                "epoch_time_sec",
+                "train_samples_per_sec",
+                "val_samples_per_sec",
+                "peak_gpu_mem_mb",
+                "lr",
             ])
 
-    def _compute_target_stats_fast(self):
-        base, idx = _unwrap_subset(self.train_dl.dataset)
-        target_cols = None
-
+    def _target_columns(self, base):
         if hasattr(base, "target_cols"):
-            target_cols = list(getattr(base, "target_cols"))
-        elif hasattr(base, "target_col"):
-            target_cols = [getattr(base, "target_col")]
+            return list(getattr(base, "target_cols"))
+        if hasattr(base, "target_col"):
+            return [getattr(base, "target_col")]
+        return None
+
+    def _compute_target_stats_exact(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Calcula media/std usando únicamente train_ds.
+
+        Si per_atom_norm=True, las estadísticas se calculan exactamente sobre:
+            y_train_per_atom = y_train / N_atoms
+        No se usa aproximación por n_mean=13.
+        """
+        base, idx = _unwrap_subset(self.train_dl.dataset)
+        target_cols = self._target_columns(base)
 
         if hasattr(base, "df") and target_cols is not None:
-            df = getattr(base, "df")
-            vals = df.iloc[idx][target_cols].values.astype("float32") if idx is not None \
-                   else df[target_cols].values.astype("float32")
+            index_array = _as_index_array(idx, len(base))
+            vals = base.df.iloc[index_array][target_cols].values.astype("float32")
+
+            if self.per_atom_norm:
+                if not hasattr(base, "num_atoms"):
+                    raise AttributeError("El dataset no expone num_atoms; no se puede calcular per_atom_norm exacto.")
+                n_atoms = np.asarray(base.num_atoms, dtype="float32")[index_array].reshape(-1, 1)
+                vals = vals / np.clip(n_atoms, 1.0, None)
+
             mean = torch.from_numpy(np.mean(vals, axis=0)).float()
-            std  = torch.from_numpy(np.std(vals,  axis=0)).float().clamp_min(1e-9)
+            std = torch.from_numpy(np.std(vals, axis=0)).float().clamp_min(1e-9)
             return mean, std
 
-        sample_n = min(5000, len(self.train_dl.dataset))
-        y_list = [torch.as_tensor(self.train_dl.dataset[i]["y"]).float().view(-1)
-                  for i in range(sample_n)]
+        # Fallback exacto, más lento: recorre el subset de entrenamiento.
+        y_list = []
+        for i in range(len(self.train_dl.dataset)):
+            sample = self.train_dl.dataset[i]
+            y = torch.as_tensor(sample["y"]).float().view(-1)
+            if self.per_atom_norm:
+                n_atoms = float(sample.get("num_atoms", sample["atom_types"].shape[0]))
+                y = y / max(n_atoms, 1.0)
+            y_list.append(y)
+
         y_values = torch.stack(y_list, dim=0)
         return y_values.mean(dim=0), y_values.std(dim=0, unbiased=False).clamp_min(1e-9)
+
+    def _batch_n_atoms(self, batch):
+        if "num_atoms" in batch and batch["num_atoms"] is not None:
+            return torch.as_tensor(batch["num_atoms"], dtype=torch.float32, device=self.device).view(-1, 1)
+
+        return torch.tensor(
+            [float(at.shape[0]) for at in batch["atom_types"]],
+            dtype=torch.float32,
+            device=self.device,
+        ).view(-1, 1)
+
+    def _to_device_list(self, values):
+        if values is None:
+            return None
+        return [v.to(self.device) if isinstance(v, torch.Tensor) else v for v in values]
 
     def _prepare_batch(self, batch):
         y = torch.as_tensor(batch["y"]).float().to(self.device)
@@ -151,65 +201,38 @@ class Trainer:
         elif y.dim() == 1:
             y = y.unsqueeze(-1)
 
-        # CAMBIO A — normalización per-atom
-        # Si el batch contiene atom_types, contamos N_átomos por molécula
-        n_atoms_list = None
-        if "atom_types" in batch and batch["atom_types"] is not None:
-            try:
-                n_atoms_list = torch.tensor(
-                    [float(at.shape[0]) for at in batch["atom_types"]],
-                    dtype=torch.float32, device=self.device
-                ).unsqueeze(-1)   # [B, 1]
-                self.per_atom_norm = True
-            except Exception:
-                n_atoms_list = None
-                self.per_atom_norm = False
-
-        if self.per_atom_norm and n_atoms_list is not None:
-            # Dividir target por N_átomos antes de normalizar
-            # Esto hace que el modelo aprenda energía por átomo,
-            # eliminando el sesgo de tamaño molecular
-            y = y / n_atoms_list.clamp_min(1.0)
+        n_atoms = self._batch_n_atoms(batch) if self.per_atom_norm else None
+        if self.per_atom_norm:
+            y = y / n_atoms.clamp_min(1.0)
 
         if self.normalize_target:
             y_mean = self.y_mean.to(self.device)
-            y_std  = self.y_std.to(self.device)
-            # Recalcular stats per-atom en la primera llamada si es necesario
-            if self.per_atom_norm and not hasattr(self, '_per_atom_stats_computed'):
-                self._per_atom_stats_computed = True
-                # Las stats ya están calculadas sobre y original;
-                # ajustar dividiendo por N_atoms_mean aproximado
-                n_mean = 13.0  # promedio átomos QM9 ≈ 13
-                self.y_mean = self.y_mean / n_mean
-                self.y_std  = self.y_std  / n_mean
-                y_mean = self.y_mean.to(self.device)
-                y_std  = self.y_std.to(self.device)
+            y_std = self.y_std.to(self.device)
             y = (y - y_mean) / y_std
 
         prepared = {
-            "atom_types":       [x.to(self.device) for x in batch["atom_types"]],
-            "coords_spherical": [c.to(self.device) for c in batch["coords_spherical"]],
-            "coords_cart":      [cc.to(self.device) for cc in batch["coords_cart"]],
-            "edge_index":       [ei.to(self.device) for ei in batch["edge_index"]],
-            "edge_attr":        [ea.to(self.device) for ea in batch["edge_attr"]],
+            "atom_types": self._to_device_list(batch["atom_types"]),
+            "coords_spherical": self._to_device_list(batch["coords_spherical"]),
+            "coords_cart": self._to_device_list(batch.get("coords_cart")),
+            "edge_index": self._to_device_list(batch.get("edge_index")),
+            "edge_attr": self._to_device_list(batch.get("edge_attr")),
             "y": y,
         }
-        # Guardar n_atoms para la desnormalización en eval
-        if n_atoms_list is not None:
-            prepared["_n_atoms"] = n_atoms_list
+        if n_atoms is not None:
+            prepared["_n_atoms"] = n_atoms
         return prepared
 
-    def _denormalize(self, pred_norm, batch_prepared):
-        """Desnormaliza predicciones al espacio original (kcal/mol)."""
-        y_std  = self.y_std.to(self.device)
-        y_mean = self.y_mean.to(self.device)
-        p = pred_norm * y_std + y_mean
+    def _denormalize(self, value_norm, batch_prepared):
+        """Desnormaliza predicción/target al espacio original del CSV."""
+        value = value_norm
+        if self.normalize_target:
+            y_std = self.y_std.to(self.device)
+            y_mean = self.y_mean.to(self.device)
+            value = value * y_std + y_mean
 
-        # CAMBIO A — multiplicar de vuelta por N_átomos
         if self.per_atom_norm and "_n_atoms" in batch_prepared:
-            n_atoms = batch_prepared["_n_atoms"]
-            p = p * n_atoms.clamp_min(1.0)
-        return p
+            value = value * batch_prepared["_n_atoms"].clamp_min(1.0)
+        return value
 
     def train_epoch(self):
         self.model.train()
@@ -243,7 +266,7 @@ class Trainer:
             torch.cuda.synchronize()
         elapsed = time.perf_counter() - t0
 
-        return total_loss / len(self.train_dl), {
+        return total_loss / max(len(self.train_dl), 1), {
             "train_time_sec": elapsed,
             "train_samples": samples_seen,
             "train_samples_per_sec": samples_seen / max(elapsed, 1e-9),
@@ -272,22 +295,18 @@ class Trainer:
                 loss = self.loss_fn(pred, batch["y"])
                 total_loss += loss.item()
 
-                # Desnormalizar usando _denormalize (incluye per-atom)
-                p = self._denormalize(pred,       batch)
-                t = self._denormalize(batch["y"], batch)
-
-                preds.append(p.cpu())
-                targets.append(t.cpu())
+                preds.append(self._denormalize(pred, batch).cpu())
+                targets.append(self._denormalize(batch["y"], batch).cpu())
 
         if self.device == "cuda":
             torch.cuda.synchronize()
         elapsed = time.perf_counter() - t0
 
-        preds   = torch.cat(preds,   dim=0)
+        preds = torch.cat(preds, dim=0)
         targets = torch.cat(targets, dim=0)
-
         metrics = evaluate_regression(preds, targets)
-        return total_loss / len(dl), metrics, {
+
+        return total_loss / max(len(dl), 1), metrics, {
             "time_sec": elapsed,
             "samples": samples_seen,
             "samples_per_sec": samples_seen / max(elapsed, 1e-9),
@@ -299,12 +318,13 @@ class Trainer:
     def save_ckpt(self, epoch):
         torch.save(
             {
-                "model":          self.model.state_dict(),
-                "epoch":          epoch,
-                "y_mean":         self.y_mean,
-                "y_std":          self.y_std,
-                "per_atom_norm":  self.per_atom_norm,
-                "hparams":        self.hparams,
+                "model": self.model.state_dict(),
+                "epoch": epoch,
+                "y_mean": self.y_mean,
+                "y_std": self.y_std,
+                "normalize_target": self.normalize_target,
+                "per_atom_norm": self.per_atom_norm,
+                "hparams": self.hparams,
             },
             os.path.join(self.ckpt_dir, "best_model.pt"),
         )
@@ -313,8 +333,7 @@ class Trainer:
         print(
             f"[MODEL] Params: {self.param_count:,} | "
             f"Size: {self.model_size_mb:.2f} MB | "
-            f"Device: {self.device} | "
-            f"grad_clip: {self.grad_clip}"
+            f"Device: {self.device} | grad_clip: {self.grad_clip}"
         )
 
         for epoch in range(1, self.max_epochs + 1):
@@ -338,10 +357,13 @@ class Trainer:
                 peak_gpu_mem_mb = None
 
             epoch_time_sec = time.perf_counter() - epoch_t0
+            mae_val = metrics.get("mae", float("nan"))
+            r2_val = metrics.get("r2", float("nan"))
 
             msg = (
                 f"Epoch {epoch}/{self.max_epochs} | "
                 f"Train MSE {train_mse:.4f} | Val MSE {val_mse:.4f} | "
+                f"Val MAE {mae_val:.4f} | Val R2 {r2_val:.6f} | "
                 f"LR {lr_now:.2e} | Time {epoch_time_sec:.2f}s | "
                 f"Train {train_perf['train_samples_per_sec']:.0f} s/s | "
                 f"Val {val_perf['samples_per_sec']:.0f} s/s"
@@ -366,16 +388,20 @@ class Trainer:
             self.history["peak_gpu_mem_mb"].append(peak_gpu_mem_mb or 0.0)
             self.history["lr"].append(lr_now)
 
-            with open(self.csv_path, "a", newline="") as f:
+            with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow([
-                    epoch, train_mse, val_mse, epoch_time_sec,
+                    epoch,
+                    train_mse,
+                    val_mse,
+                    epoch_time_sec,
                     train_perf["train_samples_per_sec"],
                     val_perf["samples_per_sec"],
-                    peak_gpu_mem_mb or "", lr_now,
+                    peak_gpu_mem_mb or "",
+                    lr_now,
                 ])
 
             if self.wait >= self.patience:
-                print(f"[EARLY STOPPING] Mejor Val MSE: {self.best_val:.4f}")
+                print(f"[EARLY STOPPING] Mejor Val MSE: {self.best_val:.6f}")
                 break
 
         self.plot()
@@ -389,30 +415,33 @@ class Trainer:
                 self.model.eval()
 
             test_mse, test_metrics, _ = self._eval_epoch(self.test_dl)
-            mae_val  = test_metrics.get("mae",  float("nan"))
+            mae_val = test_metrics.get("mae", float("nan"))
             rmse_val = test_metrics.get("rmse", float("nan"))
-            r2_val   = test_metrics.get("r2",   float("nan"))
+            r2_val = test_metrics.get("r2", float("nan"))
 
-            KCAL_TO_EV = 0.043363
+            kcal_to_ev = 0.043363
             if math.isfinite(mae_val):
-                mae_mev = mae_val * KCAL_TO_EV * 1000
+                mae_mev = mae_val * kcal_to_ev * 1000
                 print(
                     f"[TEST] MSE: {test_mse:.6f} (norm) | "
                     f"MAE: {mae_val:.4f} kcal/mol | {mae_mev:.2f} meV | "
                     f"RMSE: {rmse_val:.4f} kcal/mol | R2: {r2_val:.6f}"
                 )
-                print(f"[TEST] Referencia — SchNet: 0.3130 | MPNN: 0.3550 | NequIP: 0.0420")
-                print(f"[TEST] Factor vs SchNet: {mae_val/0.3130:.1f}x")
+                print("[TEST] Referencia — SchNet: 0.3130 kcal/mol | MPNN: 0.3550 kcal/mol")
+                print(f"[TEST] Factor vs SchNet: {mae_val / 0.3130:.1f}x")
             else:
                 print(f"[TEST] MSE: {test_mse:.6f} | MAE: nan | R2: nan")
                 print("[TEST WARNING] MAE=nan. Revisa core/metrics.py.")
 
     def plot(self):
+        if not self.history["train_mse"]:
+            return
+        plt.figure(figsize=(7, 4))
         plt.plot(self.history["train_mse"], label="Train MSE")
-        plt.plot(self.history["val_mse"],   label="Val MSE")
+        plt.plot(self.history["val_mse"], label="Val MSE")
         plt.legend()
         plt.xlabel("Epoch")
-        plt.ylabel("MSE")
+        plt.ylabel("MSE normalizado")
         plt.tight_layout()
-        plt.savefig(os.path.join(self.log_dir, "loss_curve.png"))
+        plt.savefig(os.path.join(self.log_dir, "loss_curve.png"), dpi=200)
         plt.close()

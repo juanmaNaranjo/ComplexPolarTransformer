@@ -5,23 +5,28 @@
   "target": "u0_atom",
   "split_file": "logs/split_seed42.json",
   "split": "test",
+  "unit": "kcal",
   "batch_size": 16,
   "num_samples": 12197,
+  "cutoff": 7.0,
+  "num_rbf": 150,
+  "normalize_target": true,
+  "per_atom_norm": true,
   "metrics": {
-    "mse": 15.884859085083008,
-    "rmse": 3.9855813986271826,
-    "mae_raw": 2.918600559234619,
-    "mae_mev": 126.56249890354613,
-    "mae_kcal_mol": 2.918600559234619,
-    "r2": 0.9997231960296631
+    "mse": 15.23371696472168,
+    "rmse": 3.9030394521093017,
+    "mae_raw": 2.832423210144043,
+    "mae_mev": 122.8254953539248,
+    "mae_kcal_mol": 2.832423210144043,
+    "r2": 0.9997345209121704
   },
   "performance": {
-    "inference_total_sec": 216.77837289997842,
-    "inference_ms_per_sample": 17.773089522011844,
-    "samples_per_sec": 56.26483784721319,
+    "inference_total_sec": 280.3071817000164,
+    "inference_ms_per_sample": 22.98164972534364,
+    "samples_per_sec": 43.5129771774923,
     "param_count": 1353223,
     "model_size_mb": 5.162136077880859,
-    "peak_gpu_mem_mb": 22.38232421875
+    "peak_gpu_mem_mb": 22.49609375
   },
   "split_meta": {
     "seed": 42,
@@ -31,6 +36,13 @@
     "n_val": 10000,
     "n_test": 12197,
     "target": "u0_atom",
+    "cutoff": 7.0,
+    "max_radius": 7.0,
+    "num_rbf": 150,
+    "per_atom_norm": true,
+    "normalize_target": true,
+    "sample_size": null,
+    "sample_indices": null,
     "train_idx": [
       64446,
       25784,
@@ -132235,5 +132247,5 @@
       56941
     ]
   },
-  "timestamp": "2026-04-23 21:21:49"
+  "timestamp": "2026-05-07 17:21:04"
 }

@@ -1,10 +1,13 @@
-# experiments/beta_train.yaml — ComplexPolarTransformer v7
+# experiments/beta_train_benchmark.yaml — ComplexPolarTransformer v7 corregida
 # Mejoras sobre v6:
-#   A. Normalización per-atom en trainer (elimina sesgo tamaño molecular)
-#   B. num_rbf: 50 → 150  (más resolución radial)
-#   C. cutoff: 5.0 → 7.0  (más vecinos por átomo)
-#   D. num_hidden_layers: 3 → 4  (más profundidad)
-#   E. grad_clip: 5.0 → 1.0  (en trainer, ya aplicado)
+#   A. Normalización per-atom exacta en trainer: y_stats = stats(u0_atom / N_atoms)
+#   B. num_rbf: 50 → 150
+#   C. cutoff/max_radius: 5.0 → 7.0 Å aplicado tanto al dataset como al modelo
+#   D. grad_clip: 1.0
+#
+# Nota metodológica:
+# - num_hidden_layers se mantiene en 3 para conservar la arquitectura v7 de 1,353,223 params.
+# - edge_attr[:, 0] debe ser distancia real en Å; dataset.py ya queda corregido.
 
 dataset:
   sdf: "data/qm9.sdf"
@@ -19,6 +22,10 @@ batch_size: 64
 num_workers: 8
 learning_rate: 0.0002
 max_epochs: 300
+
+normalize_target: true
+per_atom_norm: true
+grad_clip: 1.0
 
 early_stopping:
   patience: 40
@@ -38,9 +45,9 @@ model:
   in_dim: 5
   hidden_dim: 256
   out_dim: 1
-  num_hidden_layers: 3    # CAMBIO D: 3 → 4
-  num_rbf: 150            # CAMBIO B: 50 → 150
-  cutoff: 7.0             # CAMBIO C: 5.0 → 7.0
+  num_hidden_layers: 3
+  num_rbf: 150
+  cutoff: 7.0
   edge_dim: 4
   dropout: 0.1
   use_residuals: true
