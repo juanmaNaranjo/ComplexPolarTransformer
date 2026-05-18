@@ -64,6 +64,9 @@ def extract_model_config(ckpt, defaults=None):
         "dropout": 0.0,
         "use_residuals": False,
         "use_layernorm": False,
+        "activation": "modrelu",
+        "modrelu_init_bias": -0.1,
+        "modrelu_eps": 1e-8,
     }
     model_cfg = defaults.copy()
 
@@ -89,6 +92,9 @@ def build_model_from_ckpt(ckpt, state_dict, allow_partial_load=False):
         dropout=float(model_cfg.get("dropout", 0.0)),
         use_residuals=bool(model_cfg.get("use_residuals", False)),
         use_layernorm=bool(model_cfg.get("use_layernorm", False)),
+        activation=str(model_cfg.get("activation", "modrelu")),
+        modrelu_init_bias=float(model_cfg.get("modrelu_init_bias", -0.1)),
+        modrelu_eps=float(model_cfg.get("modrelu_eps", 1e-8)),
     )
 
     try:
@@ -169,7 +175,10 @@ def predict(args):
 
     cutoff = float(model_cfg.get("cutoff", args.cutoff if args.cutoff is not None else 5.0))
     num_rbf = int(model_cfg.get("num_rbf", 50))
-    print(f"[INFO] Modelo reconstruido con cutoff={cutoff:.3f} Å | num_rbf={num_rbf}")
+    print(
+        f"[INFO] Modelo reconstruido con cutoff={cutoff:.3f} Å | "
+        f"num_rbf={num_rbf} | activation={model_cfg.get('activation', 'modrelu')}"
+    )
 
     dataset_full = QM9SDFDataset(
         sdf_path=args.sdf,

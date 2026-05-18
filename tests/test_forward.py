@@ -34,6 +34,8 @@ def run_test():
         dropout=0.1,
         use_residuals=True,
         use_layernorm=True,
+        activation="modrelu",
+        modrelu_init_bias=-0.1,
     )
     model.eval()
 

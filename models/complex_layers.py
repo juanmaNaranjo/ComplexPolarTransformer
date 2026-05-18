@@ -7,6 +7,55 @@ import torch.nn.functional as F
 from .complex_tensor import ComplexTensor
 
 
+class ShiftedSoftplus(nn.Module):
+    """
+    Activación suave usada en modelos atomísticos tipo SchNet:
+        shifted_softplus(x) = softplus(x) - log(2)
+    Conserva suavidad para funciones radiales y centra la salida cerca de 0.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.softplus(x) - math.log(2.0)
+
+
+
+
+class ModReLU(nn.Module):
+    """
+    modReLU para tensores complejos en representacion polar.
+
+    Definicion implementada:
+        modReLU(z; b) = ReLU(|z| + b) * z / |z|, si |z| > eps
+                       = 0, si |z| <= eps
+
+    - Conserva la fase del numero complejo en la region activa.
+    - Aprende un sesgo real por canal oculto.
+    - Convierte internamente a cartesiano para garantizar radio positivo incluso
+      si una normalizacion previa produjo magnitudes firmadas.
+    """
+
+    def __init__(self, hidden_dim: int, init_bias: float = -0.1, eps: float = 1e-8):
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.eps = float(eps)
+        self.bias = nn.Parameter(torch.full((self.hidden_dim,), float(init_bias)))
+
+    def forward(self, cpx: ComplexTensor) -> ComplexTensor:
+        z = cpx.as_cartesian()
+        radius = torch.abs(z)
+        phase = torch.angle(z)
+
+        # Convencion estable: para z=0 la salida es 0, evitando division por |z|.
+        nonzero = (radius > self.eps).to(radius.dtype)
+        activated_radius = F.relu(radius + self.bias) * nonzero
+
+        # La fase solo importa cuando la magnitud es activa.
+        active = (activated_radius > 0).to(phase.dtype)
+        activated_phase = phase * active
+
+        return ComplexTensor(activated_radius, activated_phase)
+
+
 class RBFExpansion(nn.Module):
     """
     Expansión radial física para distancias interatómicas en Å.
@@ -80,13 +129,13 @@ class ComplexMessagePassing(nn.Module):
         super().__init__()
         self.edge_to_mag = nn.Sequential(
             nn.Linear(edge_dim, hidden_dim),
-            nn.SiLU(),
+            ShiftedSoftplus(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Softplus(),
         )
         self.edge_to_phase = nn.Sequential(
             nn.Linear(edge_dim, hidden_dim),
-            nn.SiLU(),
+            ShiftedSoftplus(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
         )
@@ -113,6 +162,14 @@ class ComplexMessagePassing(nn.Module):
         agg_mag.scatter_add_(0, dst.unsqueeze(1).expand_as(msg_mag), msg_mag)
         agg_phase.scatter_add_(0, dst.unsqueeze(1).expand_as(msg_phase), msg_phase)
 
+        # Normalización por grado: necesaria al subir cutoff a 10 Å, porque el
+        # grafo se vuelve mucho más denso y la suma cruda puede explotar.
+        deg = torch.zeros((mag.shape[0], 1), dtype=mag.dtype, device=mag.device)
+        deg.scatter_add_(0, dst.unsqueeze(1), torch.ones((dst.shape[0], 1), dtype=mag.dtype, device=mag.device))
+        deg = deg.clamp_min(1.0)
+        agg_mag = agg_mag / deg
+        agg_phase = agg_phase / deg
+
         gate = self.update_gate(torch.cat([mag, agg_mag], dim=-1))
         new_mag = self.norm_mag(mag + gate * agg_mag)
         new_phase = phase + gate * agg_phase
@@ -127,7 +184,7 @@ class EdgeBiasProjection(nn.Module):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Linear(edge_dim, hidden_dim // 4),
-            nn.SiLU(),
+            ShiftedSoftplus(),
             nn.Linear(hidden_dim // 4, 1),
         )
 

@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import random
@@ -68,7 +69,15 @@ def build_dataloader(dataset, batch_size, shuffle, num_workers, pin_memory):
 
 
 if __name__ == "__main__":
-    cfg_path = "experiments/beta_train_benchmark.yaml"
+    parser = argparse.ArgumentParser(description="Entrenamiento benchmark ComplexPolarTransformer")
+    parser.add_argument(
+        "--config",
+        default="experiments/beta_train_benchmark.yaml",
+        help="Ruta del YAML de configuración",
+    )
+    args = parser.parse_args()
+
+    cfg_path = args.config
     if not os.path.exists(cfg_path):
         raise FileNotFoundError(f"Config file not found: {cfg_path}")
 
@@ -198,6 +207,9 @@ if __name__ == "__main__":
         dropout=float(model_cfg.get("dropout", 0.0)),
         use_residuals=bool(model_cfg.get("use_residuals", False)),
         use_layernorm=bool(model_cfg.get("use_layernorm", False)),
+        activation=str(model_cfg.get("activation", "modrelu")),
+        modrelu_init_bias=float(model_cfg.get("modrelu_init_bias", -0.1)),
+        modrelu_eps=float(model_cfg.get("modrelu_eps", 1e-8)),
     )
 
     early = cfg.get("early_stopping", {}) or {}

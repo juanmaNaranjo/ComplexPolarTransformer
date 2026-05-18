@@ -7,6 +7,8 @@ from .complex_layers import (
     ComplexPolarAttention,
     ComplexMessagePassing,
     RealProjection,
+    ShiftedSoftplus,
+    ModReLU,
 )
 
 
@@ -32,6 +34,9 @@ class ComplexPolarTransformerBeta(nn.Module):
         dropout: float = 0.1,
         use_residuals: bool = True,
         use_layernorm: bool = True,
+        activation: str = "modrelu",
+        modrelu_init_bias: float = -0.1,
+        modrelu_eps: float = 1e-8,
         **kwargs,
     ):
         super().__init__()
@@ -42,10 +47,33 @@ class ComplexPolarTransformerBeta(nn.Module):
         self.cutoff = float(cutoff)
         self.use_residuals = bool(use_residuals)
         self.use_layernorm = bool(use_layernorm)
+        self.activation_name = str(activation).lower().strip()
         self.input_dim = int(in_dim) + 3  # atom_types + coordenadas esféricas (r, theta, phi)
 
         self.rbf = RBFExpansion(num_rbf=self.num_rbf, cutoff=self.cutoff)
         self.embedding = ComplexEmbedding(self.input_dim, self.hidden_dim)
+
+        if self.activation_name == "modrelu":
+            self.input_activation = ModReLU(
+                self.hidden_dim,
+                init_bias=float(modrelu_init_bias),
+                eps=float(modrelu_eps),
+            )
+            self.complex_activations = nn.ModuleList([
+                ModReLU(
+                    self.hidden_dim,
+                    init_bias=float(modrelu_init_bias),
+                    eps=float(modrelu_eps),
+                )
+                for _ in range(self.num_hidden_layers)
+            ])
+        elif self.activation_name in {"identity", "none", "linear"}:
+            self.input_activation = nn.Identity()
+            self.complex_activations = nn.ModuleList([nn.Identity() for _ in range(self.num_hidden_layers)])
+        else:
+            raise ValueError(
+                f"activation no soportada: {activation}. Usa 'modrelu' o 'identity'."
+            )
 
         self.attn_layers = nn.ModuleList([
             ComplexPolarAttention(hidden_dim=self.hidden_dim, edge_dim=self.num_rbf)
@@ -70,10 +98,10 @@ class ComplexPolarTransformerBeta(nn.Module):
         pool_dim = self.hidden_dim * 2
         self.out_head = nn.Sequential(
             nn.Linear(pool_dim, self.hidden_dim),
-            nn.SiLU(),
+            ShiftedSoftplus(),
             nn.Dropout(p=dropout / 2),
             nn.Linear(self.hidden_dim, self.hidden_dim // 2),
-            nn.SiLU(),
+            ShiftedSoftplus(),
             nn.Linear(self.hidden_dim // 2, out_dim),
         )
 
@@ -105,7 +133,7 @@ class ComplexPolarTransformerBeta(nn.Module):
 
         for feats, sph, ei, ea in zip(atom_feats, coords_sph, edge_index_list, edge_attr_list):
             x = torch.cat([feats.float(), sph.float()], dim=-1)
-            z = self.embedding(x)
+            z = self.input_activation(self.embedding(x))
 
             if self._has_edges(ei, ea):
                 rbf = self.rbf(ea.float())
@@ -126,6 +154,7 @@ class ComplexPolarTransformerBeta(nn.Module):
                 if self.use_layernorm and self.layer_norms is not None:
                     z_new.magnitude = self.layer_norms[layer_idx](z_new.magnitude)
 
+                z_new = self.complex_activations[layer_idx](z_new)
                 z_new.magnitude = self.dropout(z_new.magnitude)
                 z = z_new
 
