@@ -7,44 +7,69 @@ import torch.nn.functional as F
 from .complex_tensor import ComplexTensor
 
 
-# ─────────────────────────────────────────────
-# modReLU — activación nativa para dominio polar
-# ─────────────────────────────────────────────
+class ShiftedSoftplus(nn.Module):
+    """
+    Activación suave usada en modelos atomísticos tipo SchNet:
+        shifted_softplus(x) = softplus(x) - log(2)
+    Conserva suavidad para funciones radiales y centra la salida cerca de 0.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.softplus(x) - math.log(2.0)
+
+
+
+
 class ModReLU(nn.Module):
     """
-    Activación polar: modifica SOLO la magnitud, preserva la fase.
+    modReLU para tensores complejos en representacion polar.
 
-        modReLU(r, θ) = (ReLU(r + bias), θ)
+    Definicion implementada:
+        modReLU(z; b) = ReLU(|z| + b) * z / |z|, si |z| > eps
+                       = 0, si |z| <= eps
 
-    Bias learnable por feature. Preserva la información de orientación
-    completa, alineado con el anteproyecto (representación polar).
+    - Conserva la fase del numero complejo en la region activa.
+    - Aprende un sesgo real por canal oculto.
+    - Convierte internamente a cartesiano para garantizar radio positivo incluso
+      si una normalizacion previa produjo magnitudes firmadas.
     """
 
-    def __init__(self, dim: int):
+    def __init__(self, hidden_dim: int, init_bias: float = -0.1, eps: float = 1e-8):
         super().__init__()
-        self.bias = nn.Parameter(torch.zeros(dim))
+        self.hidden_dim = int(hidden_dim)
+        self.eps = float(eps)
+        #self.bias = nn.Parameter(torch.full((self.hidden_dim,), float(init_bias)))
+        self.bias = nn.Parameter(torch.zeros(self.hidden_dim))
 
-    def forward(self, magnitude: torch.Tensor) -> torch.Tensor:
-        return torch.clamp(magnitude + self.bias, min=0.0)
+    def forward(self, cpx: ComplexTensor) -> ComplexTensor:
+        z = cpx.as_cartesian()
+        radius = torch.abs(z)
+        phase = torch.angle(z)
+
+        # Convencion estable: para z=0 la salida es 0, evitando division por |z|.
+        nonzero = (radius > self.eps).to(radius.dtype)
+        activated_radius = F.relu(radius + self.bias) * nonzero
+
+        # La fase solo importa cuando la magnitud es activa.
+        active = (activated_radius > 0).to(phase.dtype)
+        activated_phase = phase * active
+
+        return ComplexTensor(activated_radius, activated_phase)
 
 
-# ─────────────────────────────────────────────
-# RBFExpansion con features angulares polares
-# ─────────────────────────────────────────────
 class RBFExpansion(nn.Module):
     """
-    Expansión radial + angular para aristas moleculares.
+    Expansión radial física para distancias interatómicas en Å.
 
-    Usa edge_attr con 4 columnas:
-        [:, 0]  distancia real d_ij en Å         → RBF gaussianas + cosine cutoff
-        [:, 1]  Δr normalizado                   → ignorado (redundante con dist)
-        [:, 2]  sin(Δθ)  diferencia polar         → codificación sin+cos
-        [:, 3]  sin(Δφ)  diferencia azimutal      → codificación sin+cos
+    edge_attr[:, 0] debe ser la distancia real d_ij en Å.
+    Devuelve num_rbf gaussianas centradas uniformemente en [0, cutoff] y moduladas
+    por cosine cutoff:
 
-    Output: [E, num_rbf + 4]  (RBF radiales + 4 features angulares)
+        f_cut(d) = 0.5 * (cos(pi*d/cutoff) + 1), si d < cutoff
+                 = 0, si d >= cutoff
     """
 
-    def __init__(self, num_rbf: int = 150, cutoff: float = 7.0):
+    def __init__(self, num_rbf: int = 50, cutoff: float = 5.0):
         super().__init__()
         if num_rbf < 1:
             raise ValueError("num_rbf debe ser >= 1")
@@ -57,36 +82,59 @@ class RBFExpansion(nn.Module):
         centers = torch.linspace(0.0, self.cutoff, self.num_rbf)
         self.register_buffer("centers", centers)
 
-        spacing = self.cutoff / (self.num_rbf - 1) if self.num_rbf > 1 else self.cutoff
+        if self.num_rbf == 1:
+            spacing = self.cutoff
+        else:
+            spacing = self.cutoff / (self.num_rbf - 1)
         self.gamma = 1.0 / (spacing ** 2)
 
     def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
         if edge_attr is None:
             raise ValueError("edge_attr no puede ser None en RBFExpansion.forward")
         if edge_attr.numel() == 0:
-            return edge_attr.new_empty((0, self.num_rbf + 4))
+            return edge_attr.new_empty((0, self.num_rbf))
 
-        dist   = edge_attr[:, 0].float().unsqueeze(-1)   # [E, 1]  Å
-        sin_dt = edge_attr[:, 2].float().unsqueeze(-1)   # [E, 1]  sin(Δθ)
-        sin_dp = edge_attr[:, 3].float().unsqueeze(-1)   # [E, 1]  sin(Δφ)
-
-        # RBF radiales con cosine cutoff
+        dist = edge_attr[:, 0].float().unsqueeze(-1)  # [E, 1], distancia real en Å
         rbf = torch.exp(-self.gamma * (dist - self.centers) ** 2)
+
         inside = (dist < self.cutoff).float()
-        cos_cut = 0.5 * (torch.cos(math.pi * dist / self.cutoff) + 1.0) * inside
-        rbf = rbf * cos_cut                              # [E, num_rbf]
+        cos_cutoff = 0.5 * (torch.cos(math.pi * dist / self.cutoff) + 1.0)
+        cos_cutoff = cos_cutoff * inside
 
-        # Codificación angular sin+cos (evita discontinuidades en ±π)
-        cos_dt = torch.sqrt((1.0 - sin_dt.clamp(-1.0, 1.0) ** 2).clamp(min=0.0))
-        cos_dp = torch.sqrt((1.0 - sin_dp.clamp(-1.0, 1.0) ** 2).clamp(min=0.0))
-        ang = torch.cat([sin_dt, cos_dt, sin_dp, cos_dp], dim=-1)  # [E, 4]
-
-        return torch.cat([rbf, ang], dim=-1)             # [E, num_rbf + 4]
+        return rbf * cos_cutoff
 
 
-# ─────────────────────────────────────────────
-# ComplexEmbedding
-# ─────────────────────────────────────────────
+class AngularBasis(nn.Module):
+    """
+    Expansión angular explícita para tripletas j-i-k.
+
+    Entrada: cos(theta) donde theta es el ángulo entre dos vecinos alrededor
+    del mismo átomo central i.
+    Salida: gaussianas sobre theta en [0, pi].
+
+    Esta base permite que el mensaje de una arista j->i no dependa solo de la
+    distancia d_ij, sino también de la geometría local alrededor de i.
+    """
+
+    def __init__(self, num_basis: int = 16):
+        super().__init__()
+        if num_basis < 1:
+            raise ValueError("num_basis debe ser >= 1")
+        self.num_basis = int(num_basis)
+        centers = torch.linspace(0.0, math.pi, self.num_basis)
+        self.register_buffer("centers", centers)
+        if self.num_basis == 1:
+            spacing = math.pi
+        else:
+            spacing = math.pi / (self.num_basis - 1)
+        self.gamma = 1.0 / (spacing ** 2)
+
+    def forward(self, cos_theta: torch.Tensor) -> torch.Tensor:
+        cos_theta = torch.clamp(cos_theta.float(), -1.0 + 1e-7, 1.0 - 1e-7)
+        theta = torch.acos(cos_theta).unsqueeze(-1)
+        return torch.exp(-self.gamma * (theta - self.centers) ** 2)
+
+
 class ComplexEmbedding(nn.Module):
     """Convierte features reales en representación compleja polar."""
 
@@ -94,54 +142,133 @@ class ComplexEmbedding(nn.Module):
         super().__init__()
         self.to_mag = nn.Linear(in_dim, hidden_dim)
         self.to_phase = nn.Linear(in_dim, hidden_dim)
-        self.modrelu = ModReLU(hidden_dim)
 
     def forward(self, x: torch.Tensor) -> ComplexTensor:
-        magnitude = self.modrelu(F.softplus(self.to_mag(x)))
+        magnitude = F.softplus(self.to_mag(x))
         phase = torch.tanh(self.to_phase(x)) * math.pi
         return ComplexTensor(magnitude, phase)
 
 
-# ─────────────────────────────────────────────
-# ComplexMessagePassing con modReLU
-# ─────────────────────────────────────────────
 class ComplexMessagePassing(nn.Module):
     """
-    Paso de mensajes complejo ponderado por RBF + features angulares.
+    Paso de mensajes complejo ponderado por RBF y, opcionalmente, por contexto angular.
 
-    Usa modReLU como activación sobre la magnitud del mensaje,
-    preservando la fase (orientación) sin distorsión.
+    Base radial:
+        msg_ij = phi_rbf(rbf_ij) * z_j
+
+    Variante angular explícita:
+        msg_ij = phi_rbf(rbf_ij, A_ij) * z_j
+
+    donde A_ij resume los ángulos j-i-k con otros vecinos k del mismo átomo
+    central i. Esto introduce información de tripletas sin cambiar el dataset.
     """
 
-    def __init__(self, hidden_dim: int, edge_dim: int):
+    def __init__(
+        self,
+        hidden_dim: int,
+        edge_dim: int,
+        use_angular: bool = False,
+        num_angle_basis: int = 16,
+        angular_scale_init: float = 0.1,
+    ):
         super().__init__()
-        # Proyección de edge features → espacio oculto
-        self.edge_to_hidden = nn.Sequential(
-            nn.Linear(edge_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        # modReLU para la magnitud del mensaje (preserva fase)
-        self.msg_modrelu = ModReLU(hidden_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.use_angular = bool(use_angular)
+        self.num_angle_basis = int(num_angle_basis)
 
-        # Proyección de fase del mensaje
+        self.edge_to_mag = nn.Sequential(
+            nn.Linear(edge_dim, hidden_dim),
+            ShiftedSoftplus(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Softplus(),
+        )
         self.edge_to_phase = nn.Sequential(
             nn.Linear(edge_dim, hidden_dim),
+            ShiftedSoftplus(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
         )
-        self.phase_scale = nn.Parameter(torch.tensor(math.pi))
 
-        # Compuerta de actualización (opera sobre reales — Sigmoid correcto)
+        if self.use_angular:
+            self.angle_basis = AngularBasis(num_basis=self.num_angle_basis)
+            self.angle_to_mag = nn.Sequential(
+                nn.Linear(self.num_angle_basis, hidden_dim),
+                ShiftedSoftplus(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.Tanh(),
+            )
+            self.angle_to_phase = nn.Sequential(
+                nn.Linear(self.num_angle_basis, hidden_dim),
+                ShiftedSoftplus(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.Tanh(),
+            )
+            # Escalas aprendibles inicializadas pequeñas para que el modelo arranque
+            # cerca del comportamiento radial de v8 y aprenda gradualmente el término angular.
+            self.angular_mag_scale = nn.Parameter(torch.tensor(float(angular_scale_init)))
+            self.angular_phase_scale = nn.Parameter(torch.tensor(float(angular_scale_init)))
+        else:
+            self.angle_basis = None
+            self.angle_to_mag = None
+            self.angle_to_phase = None
+            self.angular_mag_scale = None
+            self.angular_phase_scale = None
+
+        self.phase_scale = nn.Parameter(torch.tensor(math.pi))
         self.update_gate = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.Sigmoid(),
         )
-
-        # Normalización independiente de magnitud y fase
         self.norm_mag = nn.LayerNorm(hidden_dim)
-        self.norm_phase = nn.LayerNorm(hidden_dim)
 
-    def forward(self, cpx: ComplexTensor, edge_index: torch.Tensor, rbf: torch.Tensor) -> ComplexTensor:
+    def _edge_angular_features(self, coords_cart: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        """
+        Calcula un descriptor angular por arista dirigida j->i.
+
+        Para cada arista e=(j->i), se buscan las demás aristas k->i que llegan
+        al mismo átomo central i. Se calcula theta_jik y se promedia su expansión
+        angular. Resultado: [E, num_angle_basis].
+        """
+        src, dst = edge_index[0], edge_index[1]
+        e_count = int(edge_index.shape[1])
+        device = coords_cart.device
+        dtype = coords_cart.dtype
+        out = torch.zeros((e_count, self.num_angle_basis), device=device, dtype=dtype)
+
+        if e_count == 0:
+            return out
+
+        # QM9 es pequeño; este bucle por átomo central es suficientemente barato
+        # y evita añadir dependencias externas como torch_scatter.
+        for center in torch.unique(dst).tolist():
+            incoming = torch.nonzero(dst == center, as_tuple=False).view(-1)
+            m = int(incoming.numel())
+            if m < 2:
+                continue
+
+            neighbors = src[incoming]
+            center_coord = coords_cart[int(center)].view(1, 3)
+            vec = coords_cart[neighbors] - center_coord  # [m, 3]
+            norm = torch.norm(vec, dim=-1, keepdim=True).clamp_min(1e-8)
+            vec = vec / norm
+
+            cos_mat = torch.matmul(vec, vec.t()).clamp(-1.0 + 1e-7, 1.0 - 1e-7)  # [m, m]
+            basis_mat = self.angle_basis(cos_mat.reshape(-1)).reshape(m, m, self.num_angle_basis)
+
+            mask = (~torch.eye(m, dtype=torch.bool, device=device)).to(dtype).unsqueeze(-1)
+            denom = float(max(m - 1, 1))
+            avg_basis = (basis_mat * mask).sum(dim=1) / denom  # [m, K]
+            out[incoming] = avg_basis.to(dtype)
+
+        return out
+
+    def forward(
+        self,
+        cpx: ComplexTensor,
+        edge_index: torch.Tensor,
+        rbf: torch.Tensor,
+        coords_cart: torch.Tensor = None,
+    ) -> ComplexTensor:
         if edge_index is None or rbf is None or edge_index.numel() == 0 or rbf.numel() == 0:
             return cpx
 
@@ -149,40 +276,48 @@ class ComplexMessagePassing(nn.Module):
         phase = cpx.phase
         src, dst = edge_index[0], edge_index[1]
 
-        # Mensaje de magnitud: edge features proyectadas × magnitud vecino → modReLU
-        h_edge = self.edge_to_hidden(rbf)                    # [E, D]
-        msg_mag = self.msg_modrelu(h_edge * mag[src])        # modReLU polar [E, D]
+        msg_mag = self.edge_to_mag(rbf) * mag[src]
+        msg_phase = self.edge_to_phase(rbf) * self.phase_scale + phase[src]
 
-        # Mensaje de fase: desplazamiento angular aprendido
-        msg_phase = self.edge_to_phase(rbf) * self.phase_scale + phase[src]  # [E, D]
+        if self.use_angular and coords_cart is not None:
+            angle_feat = self._edge_angular_features(coords_cart.float(), edge_index)
+            angle_feat = angle_feat.to(device=mag.device, dtype=mag.dtype)
 
-        # Agregación (scatter_add)
+            angle_mag = self.angle_to_mag(angle_feat)
+            angle_phase = self.angle_to_phase(angle_feat)
+
+            # Modulación residual estable: mantiene el componente radial y agrega
+            # corrección angular aprendible.
+            msg_mag = msg_mag * (1.0 + self.angular_mag_scale * angle_mag)
+            msg_phase = msg_phase + self.angular_phase_scale * math.pi * angle_phase
+
         agg_mag = torch.zeros_like(mag)
         agg_phase = torch.zeros_like(phase)
         agg_mag.scatter_add_(0, dst.unsqueeze(1).expand_as(msg_mag), msg_mag)
         agg_phase.scatter_add_(0, dst.unsqueeze(1).expand_as(msg_phase), msg_phase)
 
-        # Compuerta + normalización de magnitud
+        # Normalización por grado: necesaria al subir cutoff a 10 Å, porque el
+        # grafo se vuelve mucho más denso y la suma cruda puede explotar.
+        deg = torch.zeros((mag.shape[0], 1), dtype=mag.dtype, device=mag.device)
+        deg.scatter_add_(0, dst.unsqueeze(1), torch.ones((dst.shape[0], 1), dtype=mag.dtype, device=mag.device))
+        deg = deg.clamp_min(1.0)
+        agg_mag = agg_mag / deg
+        agg_phase = agg_phase / deg
+
         gate = self.update_gate(torch.cat([mag, agg_mag], dim=-1))
         new_mag = self.norm_mag(mag + gate * agg_mag)
-
-        # Normalización de fase + reacotado a [-π, π]
-        new_phase = torch.tanh(self.norm_phase(phase + gate * agg_phase)) * math.pi
+        new_phase = phase + gate * agg_phase
 
         return ComplexTensor(new_mag, new_phase)
 
-
-# ─────────────────────────────────────────────
-# EdgeBiasProjection
-# ─────────────────────────────────────────────
 class EdgeBiasProjection(nn.Module):
-    """Proyecta RBF+angular a un escalar de bias para atención."""
+    """Proyecta RBF a un escalar de bias para atención."""
 
     def __init__(self, edge_dim: int, hidden_dim: int):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Linear(edge_dim, hidden_dim // 4),
-            nn.SiLU(),
+            ShiftedSoftplus(),
             nn.Linear(hidden_dim // 4, 1),
         )
 
@@ -190,19 +325,10 @@ class EdgeBiasProjection(nn.Module):
         return self.proj(rbf).squeeze(-1)
 
 
-# ─────────────────────────────────────────────
-# ComplexPolarAttention — O(E) sparse (no O(N²))
-# ─────────────────────────────────────────────
 class ComplexPolarAttention(nn.Module):
-    """
-    Atención compleja-polar sparse sobre edges definidos.
+    """Atención compleja-polar con bias de aristas basado en RBF."""
 
-    Calcula scores SOLO sobre las aristas del grafo molecular (O(E)),
-    no sobre todos los pares N×N (O(N²)). Usa scatter softmax por
-    nodo destino para normalizar los pesos de atención.
-    """
-
-    def __init__(self, hidden_dim: int, edge_dim: int = 154):
+    def __init__(self, hidden_dim: int, edge_dim: int = 50):
         super().__init__()
         self.scale = math.sqrt(hidden_dim)
         self.edge_bias = EdgeBiasProjection(edge_dim, hidden_dim)
@@ -216,47 +342,25 @@ class ComplexPolarAttention(nn.Module):
         mag = cpx.magnitude
         phase = cpx.phase
 
-        if edge_index is None or edge_index.numel() == 0:
-            return cpx
+        phase_diff = phase.unsqueeze(1) - phase.unsqueeze(0)
+        mag_prod = mag.unsqueeze(1) * mag.unsqueeze(0)
+        scores = torch.sum(mag_prod * torch.cos(phase_diff), dim=-1) / self.scale
 
-        src, dst = edge_index[0], edge_index[1]
+        if edge_index is not None and rbf is not None and edge_index.numel() > 0 and rbf.numel() > 0:
+            bias_vals = self.edge_bias(rbf)
+            i_idx, j_idx = edge_index[0], edge_index[1]
+            scores = scores.clone()
+            scores[i_idx, j_idx] += bias_vals
 
-        # Score polar: producto interno complejo sobre edges — O(E)
-        phase_diff = phase[src] - phase[dst]                         # [E, D]
-        mag_prod   = mag[src]   * mag[dst]                           # [E, D]
-        scores = (mag_prod * torch.cos(phase_diff)).sum(-1) / self.scale  # [E]
-
-        # Bias aprendido desde RBF + features angulares
-        if rbf is not None and rbf.numel() > 0:
-            scores = scores + self.edge_bias(rbf)
-
-        # Scatter softmax por nodo destino (estable)
-        scores_shifted = scores - scores.max()
-        exp_s = torch.exp(scores_shifted)
-        denom = torch.zeros(mag.shape[0], device=mag.device, dtype=mag.dtype)
-        denom.scatter_add_(0, dst, exp_s)
-        attn = exp_s / (denom[dst] + 1e-9)                          # [E]
-
-        # Agregación ponderada de magnitud y fase
-        new_mag   = torch.zeros_like(mag)
-        new_phase = torch.zeros_like(phase)
-        new_mag.scatter_add_(
-            0, dst.unsqueeze(1).expand_as(mag[src]),
-            attn.unsqueeze(1) * mag[src]
-        )
-        new_phase.scatter_add_(
-            0, dst.unsqueeze(1).expand_as(phase[src]),
-            attn.unsqueeze(1) * phase[src]
-        )
+        attn_weights = F.softmax(scores, dim=1)
+        new_mag = torch.matmul(attn_weights, mag)
+        new_phase = torch.matmul(attn_weights, phase)
 
         return ComplexTensor(new_mag, new_phase)
 
 
-# ─────────────────────────────────────────────
-# RealProjection
-# ─────────────────────────────────────────────
 class RealProjection(nn.Module):
-    """Proyecta ComplexTensor a reales concatenando parte real + imaginaria."""
+    """Proyecta ComplexTensor a reales concatenando real + imag."""
 
     def __init__(self, dim: int, out_dim: int):
         super().__init__()

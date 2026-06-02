@@ -7,39 +7,22 @@ import torch
 from rdkit import Chem
 from torch.utils.data import Dataset
 
-# ─────────────────────────────────────────────
-# Propiedades atómicas para H, C, N, O, F
-# Columnas: [masa(u), electronegatividad, valencia_max, radio_covalente(Å)]
-# ─────────────────────────────────────────────
-ATOM_PROPS = {
-    1: [1.008,  2.20, 1, 0.31],   # H
-    6: [12.011, 2.55, 4, 0.76],   # C
-    7: [14.007, 3.04, 3, 0.71],   # N
-    8: [15.999, 3.44, 2, 0.66],   # O
-    9: [18.998, 3.98, 1, 0.57],   # F
-}
-# Rangos para normalización [0, 1]
-_PROP_MIN = [1.008,  2.20, 1, 0.31]
-_PROP_MAX = [18.998, 3.98, 4, 0.76]
-
 
 class QM9SDFDataset(Dataset):
     """
     Dataset QM9 con representación geométrica polar centrada.
 
-    Versión v8:
-    - Features atómicas: one-hot 5-dim + 4 propiedades normalizadas = 9 dims.
-      Propiedades: masa atómica, electronegatividad, valencia_max, radio covalente.
-    - edge_attr[:, 0]: distancia real en Å para RBFExpansion.
-    - edge_attr[:, 2]: sin(Δθ)  diferencia angular polar.
-    - edge_attr[:, 3]: sin(Δφ)  diferencia angular azimutal.
-    - Invariancia traslacional: coordenadas centradas en el centroide.
-    - Si una molécula queda sin aristas: tensores vacíos shape-safe.
+    Correcciones clave para v7/benchmark:
+    - max_radius se recibe desde el YAML/modelo y define el radio real de aristas en Å.
+    - edge_attr[:, 0] guarda la distancia interatómica real en Å, no dist/max_radius.
+      Esto permite que RBFExpansion use centros físicos en [0, cutoff].
+    - Si una molécula queda sin aristas, se devuelven tensores vacíos con forma segura:
+      edge_index=[2,0], edge_attr=[0,4].
     """
 
-    def __init__(self, sdf_path, csv_path, target_col="u0_atom", max_radius=7.0):
+    def __init__(self, sdf_path, csv_path, target_col="u0", max_radius=5.0):
         self.max_radius = float(max_radius)
-        self.atom_list = [1, 6, 7, 8, 9]   # H, C, N, O, F
+        self.atom_list = [1, 6, 7, 8, 9]  # H, C, N, O, F
 
         suppl = Chem.SDMolSupplier(sdf_path, removeHs=False)
         df = pd.read_csv(csv_path)
@@ -75,21 +58,11 @@ class QM9SDFDataset(Dataset):
     def __len__(self):
         return len(self.mols)
 
-    def atom_to_one_hot(self, atomic_num: int) -> np.ndarray:
-        """
-        One-hot de tipo atómico (5 dims) + propiedades físico-químicas normalizadas (4 dims).
-        Total: 9 dimensiones por átomo.
-        """
-        oh = np.zeros(5, dtype=np.float32)
+    def atom_to_one_hot(self, atomic_num):
+        vec = np.zeros(len(self.atom_list), dtype=np.float32)
         if atomic_num in self.atom_list:
-            oh[self.atom_list.index(atomic_num)] = 1.0
-
-        props = ATOM_PROPS.get(atomic_num, [1.0, 2.5, 1, 0.5])
-        norm = [
-            (props[i] - _PROP_MIN[i]) / (_PROP_MAX[i] - _PROP_MIN[i] + 1e-9)
-            for i in range(4)
-        ]
-        return np.concatenate([oh, norm], dtype=np.float32)   # [9]
+            vec[self.atom_list.index(atomic_num)] = 1.0
+        return vec
 
     @staticmethod
     def cart_to_spherical(xyz):
@@ -115,19 +88,16 @@ class QM9SDFDataset(Dataset):
 
         coords_cart = np.asarray(coords_cart, dtype=np.float32)
 
-        # Invariancia traslacional: centrar la molécula
+        # Invariancia traslacional: centrar la molécula.
         coords_cart -= coords_cart.mean(axis=0)
-        coords_sph = np.asarray(
-            [self.cart_to_spherical(xyz) for xyz in coords_cart],
-            dtype=np.float32
-        )
+        coords_sph = np.asarray([self.cart_to_spherical(xyz) for xyz in coords_cart], dtype=np.float32)
 
         coords_cart = torch.from_numpy(coords_cart).float()
-        coords_sph  = torch.from_numpy(coords_sph).float()
-        atom_types  = torch.from_numpy(np.asarray(atom_types, dtype=np.float32)).float()
+        coords_sph = torch.from_numpy(coords_sph).float()
+        atom_types = torch.from_numpy(np.asarray(atom_types, dtype=np.float32)).float()
 
         edge_index = []
-        edge_attr  = []
+        edge_attr = []
 
         for i in range(num_atoms):
             for j in range(num_atoms):
@@ -143,31 +113,31 @@ class QM9SDFDataset(Dataset):
 
                     edge_index.append([i, j])
                     edge_attr.append([
-                        dist,                                           # col 0: distancia real en Å
-                        float((rj - ri) / self.max_radius),            # col 1: Δr normalizado
-                        math.sin(float(tj - ti)),                      # col 2: sin(Δθ)
-                        math.sin(float(pj - pi)),                      # col 3: sin(Δφ)
+                        dist,                              # distancia real en Å para RBF/cutoff
+                        float((rj - ri) / self.max_radius),
+                        math.sin(float(tj - ti)),
+                        math.sin(float(pj - pi)),
                     ])
 
         if edge_index:
             edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-            edge_attr  = torch.tensor(edge_attr,  dtype=torch.float32)
+            edge_attr = torch.tensor(edge_attr, dtype=torch.float32)
         else:
             edge_index = torch.empty((2, 0), dtype=torch.long)
-            edge_attr  = torch.empty((0, 4),  dtype=torch.float32)
+            edge_attr = torch.empty((0, 4), dtype=torch.float32)
 
         target = torch.tensor(float(self.df.iloc[idx][self.target_col]), dtype=torch.float32)
         sample_build_time_sec = time.perf_counter() - t0
 
         return {
-            "coords_cart":        coords_cart,
-            "coords_spherical":   coords_sph,
-            "atom_types":         atom_types,
-            "edge_index":         edge_index,
-            "edge_attr":          edge_attr,
-            "y":                  target,
+            "coords_cart": coords_cart,
+            "coords_spherical": coords_sph,
+            "atom_types": atom_types,
+            "edge_index": edge_index,
+            "edge_attr": edge_attr,
+            "y": target,
             "sample_build_time_sec": sample_build_time_sec,
-            "num_atoms":          num_atoms,
-            "num_edges":          int(edge_index.shape[1]),
-            "original_idx":       self.original_indices[idx],
+            "num_atoms": num_atoms,
+            "num_edges": int(edge_index.shape[1]),
+            "original_idx": self.original_indices[idx],
         }

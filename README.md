@@ -1,176 +1,236 @@
-Complex Polar Transformer (Beta)
-================================
+# Complex Polar Transformer — Benchmark QM9
 
-Resumen
--------
+Implementación experimental del modelo **ComplexPolarTransformer** para predicción de propiedades moleculares sobre QM9, con foco en la energía de atomización `u0_atom`.
 
-Complex Polar Transformer es una implementación experimental de un modelo de
-aprendizaje profundo para la predicción de propiedades moleculares sobre el
-benchmark QM9. El modelo explora el uso de representaciones complejas en
-coordenadas polares (magnitud y fase) junto con mecanismos de atención
-compleja-polar, con el objetivo de capturar relaciones geométricas y angulares
-entre átomos.
+Esta versión queda alineada con la configuración benchmark/v7 corregida:
 
-Este repositorio acompaña un trabajo de tesis de maestría y debe considerarse
-código de investigación en fase beta.
+- `RBFExpansion` usa distancias reales en Å.
+- `cutoff` del YAML se aplica tanto al modelo como al dataset.
+- `per_atom_norm` calcula estadísticas exactas sobre `u0_atom / N_atoms`.
+- `predict_benchmark.py` reconstruye la arquitectura desde el checkpoint y evita cargas parciales por defecto.
+- `predict.py` queda como wrapper legacy hacia `predict_benchmark.py`.
 
+> Nota importante: los checkpoints entrenados antes de estas correcciones pueden cargar por forma de parámetros, pero no son equivalentes metodológicamente, porque antes el RBF recibía `dist/max_radius` y ahora recibe distancia real en Å. Para reportar métricas oficiales con esta versión corregida, reentrena el modelo.
 
-Estado del proyecto
--------------------
+---
 
-- Estado: Beta / Experimental
-- La arquitectura y la API interna pueden cambiar.
-- El código prioriza claridad experimental y reproducibilidad sobre estabilidad
-  de producción.
+## Estructura principal
 
+```txt
+core/
+  dataset.py              # QM9SDFDataset corregido: distancia real en Å + cutoff real
+  trainer_benchmark.py    # entrenamiento benchmark con per_atom_norm exacto
+  collate.py              # collates reutilizables
+models/
+  complex_layers.py       # RBF/cosine cutoff corregidos
+  complex_model_beta.py   # forward robusto para aristas vacías/None
+experiments/
+  beta_train_benchmark.yaml
+main_train_benchmark.py
+predict_benchmark.py
+predict.py                # wrapper legacy
+tests/
+  test_forward.py
+```
 
-TL;DR (rápido)
---------------
+---
 
-1. Coloque los archivos del dataset QM9 en el directorio `data/`:
-   - qm9.sdf
-   - qm9_filtered_clean.csv
-2. Ajuste la configuración del experimento en el archivo YAML:
-   - experiments/beta_train.yaml
-3. Ejecute el entrenamiento:
-   - python main_train.py
-4. Ejecute inferencia:
-   - python predict.py --model checkpoints/model_epoch_X.pt
+## Dataset esperado
 
+Coloca los archivos en `data/`:
 
-Requisitos
-----------
+```txt
+data/qm9.sdf
+data/qm9.csv
+```
 
-- Python 3.9 – 3.10 (recomendado)
-- PyTorch (CPU o CUDA)
-- RDKit
-- NumPy
-- Pandas
-- Matplotlib
+El CSV debe incluir la columna:
 
-Instalación mínima con pip:
+```txt
+u0_atom
+```
 
-    pip install torch numpy pandas matplotlib rdkit-pypi
+Para esta versión, `u0_atom` se asume en **kcal/mol**, tal como está en tu CSV procesado.
 
-Nota: para entrenamiento con GPU se recomienda instalar PyTorch con soporte CUDA.
+---
 
+## Entrenamiento oficial v7 corregido
 
-Instalación recomendada (conda)
--------------------------------
+Configura:
 
-    conda create -n complex-polar python=3.9 -y
-    conda activate complex-polar
-    pip install -r requirements.txt
+```txt
+experiments/beta_train_benchmark.yaml
+```
 
+Ejecuta:
 
-Datos
------
+```bash
+python main_train_benchmark.py
+```
 
-El proyecto utiliza el benchmark QM9:
+La configuración principal queda así:
 
-- Archivo SDF: data/qm9.sdf
-- Archivo CSV con propiedades: data/qm9_filtered_clean.csv
+```yaml
+model:
+  in_dim: 5
+  hidden_dim: 256
+  out_dim: 1
+  num_hidden_layers: 3
+  num_rbf: 150
+  cutoff: 7.0
+  edge_dim: 4
+  dropout: 0.1
+  use_residuals: true
+  use_layernorm: true
 
-Durante la carga del dataset:
-- Las moléculas no sanitizables por RDKit se descartan automáticamente.
-- El número de moléculas válidas se reporta por consola.
+normalize_target: true
+per_atom_norm: true
+grad_clip: 1.0
+```
 
+El entrenamiento guarda:
 
-Configuración del experimento
------------------------------
+```txt
+checkpoints/best_model.pt
+logs/split_seed42.json
+logs/training_log.csv
+logs/loss_curve.png
+```
 
-La configuración se define mediante un archivo YAML. Ejemplo:
+---
 
-    dataset:
-      sdf: "data/qm9.sdf"
-      csv: "data/qm9_filtered_clean.csv"
-      target: "u0"
+## Predicción / evaluación benchmark
 
-    sample_size: 10000
-    seed: 42
+Comando oficial para `u0_atom`:
 
-    batch_size: 16
-    validation_split: 0.1
-    learning_rate: 0.001
-    max_epochs: 300
+```bash
+python predict_benchmark.py \
+  --sdf data/qm9.sdf \
+  --csv data/qm9.csv \
+  --target u0_atom \
+  --model checkpoints/best_model.pt \
+  --split-file logs/split_seed42.json \
+  --split test \
+  --unit kcal \
+  --batch-size 64 \
+  --output results/predictions_v7_corrected.csv \
+  --plot results/pred_vs_real_v7_corrected.png
+```
 
-    model:
-      in_dim: 5
-      hidden_dim: 256
-      out_dim: 1
+El script reconstruye automáticamente:
 
-Este enfoque permite:
-- Reproducibilidad de los experimentos
-- Trazabilidad de hiperparámetros
-- Separación clara entre código y configuración
+- `num_hidden_layers`
+- `num_rbf`
+- `cutoff`
+- `dropout`
+- `use_residuals`
+- `use_layernorm`
+- `per_atom_norm`
+- `y_mean` y `y_std`
 
+No se permite carga parcial del checkpoint por defecto. Para depuración existe:
 
-Entrenamiento
--------------
+```bash
+--allow-partial-load
+```
 
-Para entrenar el modelo:
+No uses esa opción para reportar métricas oficiales.
 
-    python main_train.py
+---
 
-Durante el entrenamiento:
-- Se guardan checkpoints en el directorio `checkpoints/`
-- Se reportan métricas de validación (MAE, RMSE y R²)
-- Se guarda la normalización del target para uso posterior en inferencia
+## Prueba rápida del forward
 
+```bash
+python tests/test_forward.py
+```
 
-Inferencia / Predicción
------------------------
+Debe responder:
 
-Ejemplo de uso:
+```txt
+test_forward: OK — output shape: torch.Size([2, 1])
+```
 
-    python predict.py \
-      --sdf data/qm9.sdf \
-      --csv data/qm9_filtered_clean.csv \
-      --model checkpoints/model_epoch_300.pt \
-      --output results/predictions.csv
+---
 
-El script de predicción:
-- Desnormaliza las predicciones
-- Calcula métricas de desempeño
-- Genera una gráfica de Predicciones vs Valores reales
+## Cambios metodológicos aplicados
 
+### 1. Cutoff real
 
-Estructura del repositorio
---------------------------
+Antes, `experiments/beta_train_benchmark.yaml` decía `cutoff: 7.0`, pero el dataset seguía usando `max_radius=5.0` por defecto. Ahora `main_train_benchmark.py` pasa `cutoff` al dataset:
 
-    .
-    ├── core/           # dataset, trainer, métricas y utilidades
-    ├── models/         # modelo complejo-polar y capas
-    ├── experiments/    # archivos YAML de configuración
-    ├── data/           # QM9 y archivos auxiliares
-    ├── checkpoints/    # modelos entrenados (no versionados)
-    ├── results/        # predicciones y gráficas
-    ├── main_train.py
-    ├── predict.py
-    └── README.txt
+```python
+dataset = QM9SDFDataset(..., max_radius=cutoff)
+```
 
+### 2. Distancia real para RBF
 
-Reproducibilidad
-----------------
+Antes, `edge_attr[:, 0]` era:
 
-- Se fija una semilla global (seed) para todos los experimentos.
-- La normalización del target se calcula únicamente con el conjunto de
-  entrenamiento.
-- Los hiperparámetros y estadísticas se almacenan en cada checkpoint.
+```python
+dist / self.max_radius
+```
 
+Ahora es:
 
-Licencia y citación
--------------------
+```python
+dist
+```
 
-Incluya aquí la licencia correspondiente (por ejemplo MIT).
+Por tanto, las gaussianas RBF están centradas en Å reales dentro de `[0, cutoff]`.
 
-Si este código se utiliza en trabajos académicos, por favor cite el trabajo
-asociado a la tesis.
+### 3. Cosine cutoff corregido
 
+Ahora la contribución fuera del cutoff se anula explícitamente:
 
-Contacto
---------
+```python
+inside = (dist < self.cutoff).float()
+cos_cutoff = 0.5 * (torch.cos(math.pi * dist / self.cutoff) + 1.0)
+cos_cutoff = cos_cutoff * inside
+```
 
-Para reportar errores o realizar sugerencias:
-- utilice el sistema de issues del repositorio
-- o contacte directamente al autor del proyecto
+### 4. Normalización per-atom exacta
+
+Antes se aproximaba dividiendo estadísticas por `n_mean = 13.0`. Ahora se calcula directamente:
+
+```txt
+mean(u0_atom / N_atoms)
+std(u0_atom / N_atoms)
+```
+
+usando únicamente el split de entrenamiento.
+
+### 5. Predicción segura
+
+`predict_benchmark.py` ahora carga primero el checkpoint, lee la configuración del modelo y luego crea el dataset con el mismo `cutoff` usado en entrenamiento.
+
+---
+
+## Reproducibilidad
+
+El split se guarda en:
+
+```txt
+logs/split_seed42.json
+```
+
+Incluye:
+
+- `n_total`
+- `n_train`
+- `n_val`
+- `n_test`
+- `target`
+- `cutoff`
+- `num_rbf`
+- `per_atom_norm`
+- índices de train/val/test
+
+---
+
+## Resultado anterior vs versión corregida
+
+El resultado anterior `MAE ≈ 2.919 kcal/mol` corresponde al código previo. Después de esta corrección, debes reentrenar para obtener una métrica metodológicamente consistente con:
+
+```txt
+RBF×150 + cutoff real 7 Å + normalización per-atom exacta
+```

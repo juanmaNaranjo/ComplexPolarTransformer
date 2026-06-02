@@ -1,0 +1,56 @@
+# experiments/beta_train_v9_angular_modrelu.yaml
+# Variante con información angular explícita j-i-k sobre la base v8_modReLU.
+# Objetivo: reducir MAE incorporando geometría local de tripletas, no solo distancias radiales.
+
+dataset:
+  sdf: "data/qm9.sdf"
+  csv: "data/qm9.csv"
+  target: "u0_atom"
+
+benchmark_split: true
+sample_size: null
+seed: 42
+
+batch_size: 32
+num_workers: 8
+learning_rate: 0.0003
+max_epochs: 650
+
+normalize_target: true
+per_atom_norm: true
+grad_clip: 0.35
+
+early_stopping:
+  patience: 90
+  min_delta: 0.00003
+
+scheduler:
+  name: reduce_on_plateau
+  factor: 0.55
+  patience: 20
+  min_lr: 1e-7
+
+ckpt_dir: "checkpoints_v9_angular_modrelu"
+log_dir: "logs_v9_angular_modrelu"
+split_path: "logs_v9_angular_modrelu/split_seed42.json"
+
+model:
+  in_dim: 5
+  hidden_dim: 384
+  out_dim: 1
+  num_hidden_layers: 3
+  num_rbf: 300
+  cutoff: 10.0
+  edge_dim: 4
+  dropout: 0.04
+  use_residuals: true
+  use_layernorm: true
+  activation: "modrelu"
+  modrelu_init_bias: -0.08
+  modrelu_eps: 1e-8
+
+  # Angular explícito: para cada arista j->i, el mensaje se modula con
+  # el promedio de ángulos j-i-k respecto a otros vecinos k del centro i.
+  use_angular: true
+  num_angle_basis: 24
+  angular_scale_init: 0.1

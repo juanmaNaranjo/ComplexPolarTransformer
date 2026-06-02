@@ -1,15 +1,13 @@
-# experiments/beta_train_benchmark.yaml — ComplexPolarTransformer v8
-#
-# Cambios respecto a v7:
-#   A. per_atom_norm: false  — u0_atom ya está normalizado por átomo en QM9
-#   B. num_hidden_layers: 6  — mayor campo receptivo (3→6 saltos)
-#   C. hidden_dim: 384       — más capacidad (256→384, ~4.7M params)
-#   D. in_dim: 9             — features atómicas enriquecidas (5→9)
-#   E. dropout: 0.05         — menos regularización con más datos y capas
-#   F. patience: 60          — evitar parada prematura con scheduler
-#   G. min_delta: 0.00005    — umbral de mejora más fino
-#   H. warmup_epochs: 30     — estabilizar fases al inicio (en trainer)
-#   I. weight_decay: 1e-3    — en trainer (no en yaml, ya actualizado)
+# experiments/beta_train_benchmark.yaml — ComplexPolarTransformer v10
+# Correcciones aplicadas sobre v7:
+#   A. per_atom_norm: false  — u0_atom es energía de atomización total (NO por átomo),
+#      dividir por N_atoms introduce sesgo con el tamaño molecular
+#   B. grad_clip: 1.0        — valor original ya correcto; 0.35 causaba 39 saltos >30% en v9
+#   C. HuberLoss en trainer  — cambiar loss_fn en trainer_benchmark.py línea 69
+#   D. angular_scale_init: 0.3 — 0.1 silenciaba las features angulares desde el inicio
+#   E. activation: modrelu   — requerido por ComplexPolarTransformerBeta
+#   F. cutoff: 7.0 / num_rbf: 150 — balance cobertura geométrica vs costo computacional
+#   G. patience ajustado a 50 con min_delta más fino para no cortar temprano
 
 dataset:
   sdf: "data/qm9.sdf"
@@ -23,15 +21,15 @@ seed: 42
 batch_size: 64
 num_workers: 8
 learning_rate: 0.0002
-max_epochs: 500
+max_epochs: 300
 
 normalize_target: true
-per_atom_norm: false          # CRÍTICO: u0_atom ya es U0/N_atoms en QM9
+per_atom_norm: false
 grad_clip: 1.0
 
 early_stopping:
-  patience: 60                # era: 40
-  min_delta: 0.00005          # era: 0.0001
+  patience: 50
+  min_delta: 0.00003
 
 scheduler:
   name: reduce_on_plateau
@@ -39,18 +37,24 @@ scheduler:
   patience: 15
   min_lr: 1e-6
 
-ckpt_dir: "checkpoints"
-log_dir: "logs"
-split_path: "logs/split_seed42.json"
+ckpt_dir: "checkpoints_v10"
+log_dir: "logs_v10"
+split_path: "logs_v10/split_seed42.json"
 
 model:
-  in_dim: 9                   # era: 5 — one-hot(5) + masa,EN,valencia,r_cov
-  hidden_dim: 384             # era: 256 — más capacidad representacional
+  in_dim: 5
+  hidden_dim: 256
   out_dim: 1
-  num_hidden_layers: 6        # era: 3 — mayor campo receptivo
+  num_hidden_layers: 3
   num_rbf: 150
   cutoff: 7.0
-  edge_dim: 4                 # conservado; internamente se usa num_rbf+4
-  dropout: 0.05               # era: 0.1
+  edge_dim: 4
+  dropout: 0.05
   use_residuals: true
   use_layernorm: true
+  activation: "modrelu"
+  modrelu_init_bias: -0.08
+  modrelu_eps: 1e-8
+  use_angular: true
+  num_angle_basis: 24
+  angular_scale_init: 0.3

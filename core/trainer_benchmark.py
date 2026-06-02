@@ -7,15 +7,19 @@ from typing import Iterable, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from torch.utils.data import Subset
 
 from core.metrics import evaluate_regression
 
 
 def _unwrap_subset(ds):
+    """
+    Devuelve (dataset_base, indices_en_dataset_base) para Subset anidados.
+    Si ds no es Subset, indices=None.
+    """
     indices = None
     base = ds
+
     while isinstance(base, Subset):
         current = list(base.indices)
         if indices is None:
@@ -23,6 +27,7 @@ def _unwrap_subset(ds):
         else:
             indices = [current[i] for i in indices]
         base = base.dataset
+
     return base, indices
 
 
@@ -44,13 +49,12 @@ class Trainer:
         ckpt_dir="checkpoints",
         log_dir="logs",
         normalize_target=True,
-        per_atom_norm=False,          # False cuando target ya es per-atom (u0_atom)
+        per_atom_norm=True,
         hparams: dict = None,
         grad_clip=1.0,
-        patience=60,
-        min_delta=5e-5,
+        patience=30,
+        min_delta=5e-4,
         scheduler_cfg=None,
-        warmup_epochs=30,
     ):
         self.model = model
         self.train_dl = train_dl
@@ -61,13 +65,9 @@ class Trainer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(self.device)
 
-        # ── Optimizador con weight_decay más fuerte ──────────────────────────
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=lr, weight_decay=1e-3
-        )
-
-        # ── L1Loss: optimiza MAE directamente ────────────────────────────────
-        self.loss_fn = torch.nn.L1Loss()
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
+        #self.loss_fn = torch.nn.MSELoss()
+        self.loss_fn = torch.nn.HuberLoss(delta=0.1)
 
         os.makedirs(ckpt_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
@@ -91,7 +91,7 @@ class Trainer:
             self.y_mean, self.y_std = self._compute_target_stats_exact()
         else:
             self.y_mean = torch.zeros(self.num_targets, dtype=torch.float32)
-            self.y_std  = torch.ones(self.num_targets,  dtype=torch.float32)
+            self.y_std = torch.ones(self.num_targets, dtype=torch.float32)
 
         print(
             f"[TARGET] normalize_target={self.normalize_target} | "
@@ -99,51 +99,41 @@ class Trainer:
             f"y_mean={self.y_mean.tolist()} | y_std={self.y_std.tolist()}"
         )
 
-        # ── EMA de pesos (decay=0.999) ────────────────────────────────────────
-        self.ema_model = AveragedModel(
-            self.model,
-            multi_avg_fn=get_ema_multi_avg_fn(0.999)
-        )
-
-        # ── Warm-up lineal + ReduceLROnPlateau ───────────────────────────────
-        self.warmup_epochs = int(warmup_epochs)
-        self.warmup_sched = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer,
-            start_factor=0.05,
-            end_factor=1.0,
-            total_iters=self.warmup_epochs,
-        )
-
         self.scheduler = None
         if isinstance(scheduler_cfg, dict) and scheduler_cfg.get("name", "") == "reduce_on_plateau":
-            factor       = float(scheduler_cfg.get("factor",   0.5))
-            sched_pat    = int(scheduler_cfg.get("patience",   15))
-            min_lr       = float(scheduler_cfg.get("min_lr",   1e-6))
+            factor = float(scheduler_cfg.get("factor", 0.5))
+            sched_patience = int(scheduler_cfg.get("patience", 10))
+            min_lr = float(scheduler_cfg.get("min_lr", 1e-5))
             self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer, mode="min", factor=factor,
-                patience=sched_pat, min_lr=min_lr,
+                self.optimizer, mode="min", factor=factor, patience=sched_patience, min_lr=min_lr
             )
 
-        self.param_count    = sum(p.numel() for p in self.model.parameters())
-        self.model_size_mb  = sum(
-            p.numel() * p.element_size() for p in self.model.parameters()
-        ) / (1024 ** 2)
+        self.param_count = sum(p.numel() for p in self.model.parameters())
+        self.model_size_mb = sum(p.numel() * p.element_size() for p in self.model.parameters()) / (1024 ** 2)
 
         self.history = {
-            "epoch": [], "train_mae": [], "val_mae": [],
-            "epoch_time_sec": [], "train_samples_per_sec": [],
-            "val_samples_per_sec": [], "peak_gpu_mem_mb": [], "lr": [],
+            "epoch": [],
+            "train_mse": [],
+            "val_mse": [],
+            "epoch_time_sec": [],
+            "train_samples_per_sec": [],
+            "val_samples_per_sec": [],
+            "peak_gpu_mem_mb": [],
+            "lr": [],
         }
 
         self.csv_path = os.path.join(self.log_dir, "training_log.csv")
         with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([
-                "epoch", "train_mae", "val_mae", "epoch_time_sec",
-                "train_samples_per_sec", "val_samples_per_sec",
-                "peak_gpu_mem_mb", "lr",
+                "epoch",
+                "train_mse",
+                "val_mse",
+                "epoch_time_sec",
+                "train_samples_per_sec",
+                "val_samples_per_sec",
+                "peak_gpu_mem_mb",
+                "lr",
             ])
-
-    # ── Utilidades internas ───────────────────────────────────────────────────
 
     def _target_columns(self, base):
         if hasattr(base, "target_cols"):
@@ -154,10 +144,11 @@ class Trainer:
 
     def _compute_target_stats_exact(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Calcula media/std únicamente sobre train_ds.
+        Calcula media/std usando únicamente train_ds.
 
-        Nota: si per_atom_norm=False (u0_atom ya es per-atom) las stats
-        se calculan directamente sobre los valores del CSV sin dividir por N_atoms.
+        Si per_atom_norm=True, las estadísticas se calculan exactamente sobre:
+            y_train_per_atom = y_train / N_atoms
+        No se usa aproximación por n_mean=13.
         """
         base, idx = _unwrap_subset(self.train_dl.dataset)
         target_cols = self._target_columns(base)
@@ -168,15 +159,15 @@ class Trainer:
 
             if self.per_atom_norm:
                 if not hasattr(base, "num_atoms"):
-                    raise AttributeError("El dataset no expone num_atoms.")
+                    raise AttributeError("El dataset no expone num_atoms; no se puede calcular per_atom_norm exacto.")
                 n_atoms = np.asarray(base.num_atoms, dtype="float32")[index_array].reshape(-1, 1)
                 vals = vals / np.clip(n_atoms, 1.0, None)
 
             mean = torch.from_numpy(np.mean(vals, axis=0)).float()
-            std  = torch.from_numpy(np.std( vals, axis=0)).float().clamp_min(1e-9)
+            std = torch.from_numpy(np.std(vals, axis=0)).float().clamp_min(1e-9)
             return mean, std
 
-        # Fallback lento
+        # Fallback exacto, más lento: recorre el subset de entrenamiento.
         y_list = []
         for i in range(len(self.train_dl.dataset)):
             sample = self.train_dl.dataset[i]
@@ -191,12 +182,12 @@ class Trainer:
 
     def _batch_n_atoms(self, batch):
         if "num_atoms" in batch and batch["num_atoms"] is not None:
-            return torch.as_tensor(
-                batch["num_atoms"], dtype=torch.float32, device=self.device
-            ).view(-1, 1)
+            return torch.as_tensor(batch["num_atoms"], dtype=torch.float32, device=self.device).view(-1, 1)
+
         return torch.tensor(
             [float(at.shape[0]) for at in batch["atom_types"]],
-            dtype=torch.float32, device=self.device,
+            dtype=torch.float32,
+            device=self.device,
         ).view(-1, 1)
 
     def _to_device_list(self, values):
@@ -217,15 +208,15 @@ class Trainer:
 
         if self.normalize_target:
             y_mean = self.y_mean.to(self.device)
-            y_std  = self.y_std.to(self.device)
+            y_std = self.y_std.to(self.device)
             y = (y - y_mean) / y_std
 
         prepared = {
-            "atom_types":       self._to_device_list(batch["atom_types"]),
+            "atom_types": self._to_device_list(batch["atom_types"]),
             "coords_spherical": self._to_device_list(batch["coords_spherical"]),
-            "coords_cart":      self._to_device_list(batch.get("coords_cart")),
-            "edge_index":       self._to_device_list(batch.get("edge_index")),
-            "edge_attr":        self._to_device_list(batch.get("edge_attr")),
+            "coords_cart": self._to_device_list(batch.get("coords_cart")),
+            "edge_index": self._to_device_list(batch.get("edge_index")),
+            "edge_attr": self._to_device_list(batch.get("edge_attr")),
             "y": y,
         }
         if n_atoms is not None:
@@ -233,16 +224,16 @@ class Trainer:
         return prepared
 
     def _denormalize(self, value_norm, batch_prepared):
+        """Desnormaliza predicción/target al espacio original del CSV."""
         value = value_norm
         if self.normalize_target:
-            y_std  = self.y_std.to(self.device)
+            y_std = self.y_std.to(self.device)
             y_mean = self.y_mean.to(self.device)
-            value  = value * y_std + y_mean
-        if self.per_atom_norm and "_n_atoms" in batch_prepared:
-            value  = value * batch_prepared["_n_atoms"].clamp_min(1.0)
-        return value
+            value = value * y_std + y_mean
 
-    # ── Epoch de entrenamiento ────────────────────────────────────────────────
+        if self.per_atom_norm and "_n_atoms" in batch_prepared:
+            value = value * batch_prepared["_n_atoms"].clamp_min(1.0)
+        return value
 
     def train_epoch(self):
         self.model.train()
@@ -270,10 +261,6 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
             self.optimizer.step()
-
-            # Actualizar EMA después de cada paso
-            self.ema_model.update_parameters(self.model)
-
             total_loss += loss.item()
 
         if self.device == "cuda":
@@ -281,15 +268,13 @@ class Trainer:
         elapsed = time.perf_counter() - t0
 
         return total_loss / max(len(self.train_dl), 1), {
-            "train_time_sec":          elapsed,
-            "train_samples":           samples_seen,
-            "train_samples_per_sec":   samples_seen / max(elapsed, 1e-9),
+            "train_time_sec": elapsed,
+            "train_samples": samples_seen,
+            "train_samples_per_sec": samples_seen / max(elapsed, 1e-9),
         }
 
-    # ── Epoch de evaluación (usa EMA) ─────────────────────────────────────────
-
     def _eval_epoch(self, dl):
-        self.ema_model.eval()          # evaluar con pesos EMA
+        self.model.eval()
         total_loss = 0.0
         preds, targets = [], []
         samples_seen = 0
@@ -303,7 +288,7 @@ class Trainer:
                 batch = self._prepare_batch(batch)
                 samples_seen += batch["y"].shape[0]
 
-                pred = self.ema_model(batch)   # pesos EMA
+                pred = self.model(batch)
                 pred = torch.as_tensor(pred).float()
                 if pred.dim() == 1:
                     pred = pred.unsqueeze(-1)
@@ -318,44 +303,38 @@ class Trainer:
             torch.cuda.synchronize()
         elapsed = time.perf_counter() - t0
 
-        preds   = torch.cat(preds,   dim=0)
+        preds = torch.cat(preds, dim=0)
         targets = torch.cat(targets, dim=0)
         metrics = evaluate_regression(preds, targets)
 
         return total_loss / max(len(dl), 1), metrics, {
-            "time_sec":         elapsed,
-            "samples":          samples_seen,
-            "samples_per_sec":  samples_seen / max(elapsed, 1e-9),
+            "time_sec": elapsed,
+            "samples": samples_seen,
+            "samples_per_sec": samples_seen / max(elapsed, 1e-9),
         }
 
     def val_epoch(self):
         return self._eval_epoch(self.val_dl)
 
-    # ── Checkpoint ───────────────────────────────────────────────────────────
-
     def save_ckpt(self, epoch):
         torch.save(
             {
-                "model":            self.model.state_dict(),
-                "ema_model":        self.ema_model.module.state_dict(),
-                "epoch":            epoch,
-                "y_mean":           self.y_mean,
-                "y_std":            self.y_std,
+                "model": self.model.state_dict(),
+                "epoch": epoch,
+                "y_mean": self.y_mean,
+                "y_std": self.y_std,
                 "normalize_target": self.normalize_target,
-                "per_atom_norm":    self.per_atom_norm,
-                "hparams":          self.hparams,
+                "per_atom_norm": self.per_atom_norm,
+                "hparams": self.hparams,
             },
             os.path.join(self.ckpt_dir, "best_model.pt"),
         )
-
-    # ── Loop principal ────────────────────────────────────────────────────────
 
     def fit(self):
         print(
             f"[MODEL] Params: {self.param_count:,} | "
             f"Size: {self.model_size_mb:.2f} MB | "
-            f"Device: {self.device} | grad_clip: {self.grad_clip} | "
-            f"warmup: {self.warmup_epochs} épocas"
+            f"Device: {self.device} | grad_clip: {self.grad_clip}"
         )
 
         for epoch in range(1, self.max_epochs + 1):
@@ -364,15 +343,11 @@ class Trainer:
                 torch.cuda.synchronize()
 
             epoch_t0 = time.perf_counter()
-            train_mae, train_perf = self.train_epoch()
-            val_mae, metrics, val_perf = self.val_epoch()
+            train_mse, train_perf = self.train_epoch()
+            val_mse, metrics, val_perf = self.val_epoch()
 
-            # Scheduler: warm-up primero, luego ReduceLROnPlateau
-            if epoch <= self.warmup_epochs:
-                self.warmup_sched.step()
-            else:
-                if self.scheduler is not None:
-                    self.scheduler.step(val_mae)
+            if self.scheduler is not None:
+                self.scheduler.step(val_mse)
 
             lr_now = float(self.optimizer.param_groups[0]["lr"])
 
@@ -383,14 +358,13 @@ class Trainer:
                 peak_gpu_mem_mb = None
 
             epoch_time_sec = time.perf_counter() - epoch_t0
-            mae_val = metrics.get("mae",  float("nan"))
-            r2_val  = metrics.get("r2",   float("nan"))
+            mae_val = metrics.get("mae", float("nan"))
+            r2_val = metrics.get("r2", float("nan"))
 
-            phase = "WARMUP" if epoch <= self.warmup_epochs else "TRAIN"
             msg = (
-                f"[{phase}] Epoch {epoch}/{self.max_epochs} | "
-                f"Train MAE {train_mae:.4f} | Val MAE {val_mae:.4f} | "
-                f"Val MAE (kcal) {mae_val:.4f} | Val R2 {r2_val:.6f} | "
+                f"Epoch {epoch}/{self.max_epochs} | "
+                f"Train MSE {train_mse:.4f} | Val MSE {val_mse:.4f} | "
+                f"Val MAE {mae_val:.4f} | Val R2 {r2_val:.6f} | "
                 f"LR {lr_now:.2e} | Time {epoch_time_sec:.2f}s | "
                 f"Train {train_perf['train_samples_per_sec']:.0f} s/s | "
                 f"Val {val_perf['samples_per_sec']:.0f} s/s"
@@ -399,16 +373,16 @@ class Trainer:
                 msg += f" | GPU {peak_gpu_mem_mb:.1f} MB"
             print(msg)
 
-            if val_mae < self.best_val - self.min_delta:
-                self.best_val = val_mae
+            if val_mse < self.best_val - self.min_delta:
+                self.best_val = val_mse
                 self.wait = 0
                 self.save_ckpt(epoch)
             else:
                 self.wait += 1
 
             self.history["epoch"].append(epoch)
-            self.history["train_mae"].append(train_mae)
-            self.history["val_mae"].append(val_mae)
+            self.history["train_mse"].append(train_mse)
+            self.history["val_mse"].append(val_mse)
             self.history["epoch_time_sec"].append(epoch_time_sec)
             self.history["train_samples_per_sec"].append(train_perf["train_samples_per_sec"])
             self.history["val_samples_per_sec"].append(val_perf["samples_per_sec"])
@@ -417,7 +391,10 @@ class Trainer:
 
             with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow([
-                    epoch, train_mae, val_mae, epoch_time_sec,
+                    epoch,
+                    train_mse,
+                    val_mse,
+                    epoch_time_sec,
                     train_perf["train_samples_per_sec"],
                     val_perf["samples_per_sec"],
                     peak_gpu_mem_mb or "",
@@ -425,7 +402,7 @@ class Trainer:
                 ])
 
             if self.wait >= self.patience:
-                print(f"[EARLY STOPPING] Mejor Val MAE: {self.best_val:.6f}")
+                print(f"[EARLY STOPPING] Mejor Val MSE: {self.best_val:.6f}")
                 break
 
         self.plot()
@@ -434,45 +411,38 @@ class Trainer:
             best_path = os.path.join(self.ckpt_dir, "best_model.pt")
             if os.path.exists(best_path):
                 ckpt = torch.load(best_path, map_location=self.device)
-                # Cargar pesos EMA para el test final
-                ema_sd = ckpt.get("ema_model", ckpt.get("model"))
-                self.model.load_state_dict(ema_sd)
+                self.model.load_state_dict(ckpt["model"])
                 self.model.to(self.device)
                 self.model.eval()
-                # Sincronizar EMA con los pesos cargados
-                self.ema_model = AveragedModel(
-                    self.model,
-                    multi_avg_fn=get_ema_multi_avg_fn(0.999)
-                )
 
-            test_mae, test_metrics, _ = self._eval_epoch(self.test_dl)
-            mae_val  = test_metrics.get("mae",  float("nan"))
+            test_mse, test_metrics, _ = self._eval_epoch(self.test_dl)
+            mae_val = test_metrics.get("mae", float("nan"))
             rmse_val = test_metrics.get("rmse", float("nan"))
-            r2_val   = test_metrics.get("r2",   float("nan"))
+            r2_val = test_metrics.get("r2", float("nan"))
 
             kcal_to_ev = 0.043363
             if math.isfinite(mae_val):
                 mae_mev = mae_val * kcal_to_ev * 1000
                 print(
-                    f"[TEST] MAE: {mae_val:.4f} kcal/mol | {mae_mev:.2f} meV | "
+                    f"[TEST] MSE: {test_mse:.6f} (norm) | "
+                    f"MAE: {mae_val:.4f} kcal/mol | {mae_mev:.2f} meV | "
                     f"RMSE: {rmse_val:.4f} kcal/mol | R2: {r2_val:.6f}"
                 )
-                print("[TEST] Referencia — SchNet: 0.3130 kcal/mol | NequIP: ~0.0430 kcal/mol")
-                print(f"[TEST] Factor vs SchNet: {mae_val / 0.3130:.2f}x")
-                print(f"[TEST] Objetivo tesis: < 0.09 kcal/mol → {'✓ ALCANZADO' if mae_val < 0.09 else '✗ pendiente'}")
+                print("[TEST] Referencia — SchNet: 0.3130 kcal/mol | MPNN: 0.3550 kcal/mol")
+                print(f"[TEST] Factor vs SchNet: {mae_val / 0.3130:.1f}x")
             else:
-                print(f"[TEST] MAE: nan | R2: nan")
+                print(f"[TEST] MSE: {test_mse:.6f} | MAE: nan | R2: nan")
+                print("[TEST WARNING] MAE=nan. Revisa core/metrics.py.")
 
     def plot(self):
-        if not self.history["train_mae"]:
+        if not self.history["train_mse"]:
             return
         plt.figure(figsize=(7, 4))
-        plt.plot(self.history["train_mae"], label="Train MAE (norm)")
-        plt.plot(self.history["val_mae"],   label="Val MAE (norm)")
+        plt.plot(self.history["train_mse"], label="Train MSE")
+        plt.plot(self.history["val_mse"], label="Val MSE")
         plt.legend()
         plt.xlabel("Epoch")
-        plt.ylabel("MAE normalizado")
-        plt.title("Curva de entrenamiento — ComplexPolarTransformer v8")
+        plt.ylabel("MSE normalizado")
         plt.tight_layout()
         plt.savefig(os.path.join(self.log_dir, "loss_curve.png"), dpi=200)
         plt.close()
