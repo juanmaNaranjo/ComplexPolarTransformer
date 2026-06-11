@@ -20,7 +20,7 @@ def collate_mol(batch):
         "atom_types": [item["atom_types"] for item in batch],
         "edge_index": [item["edge_index"] for item in batch],
         "edge_attr": [item["edge_attr"] for item in batch],
-        "y": torch.stack([item["y"] for item in batch])
+        "y": torch.stack([item["y"] for item in batch]),
     }
 
 
@@ -32,25 +32,32 @@ if __name__ == "__main__":
     cfg_path = "experiments/beta_train.yaml"
     if not os.path.exists(cfg_path):
         raise FileNotFoundError(f"Config file not found: {cfg_path}")
-    cfg = yaml.safe_load(open(cfg_path))
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
     dataset_cfg = cfg["dataset"]
 
     # ============================
-    # 2) Crear Dataset completo
+    # 2) Fix seed y preparación
+    # ============================
+    seed = cfg.get("seed", 42)
+    set_seed(seed)
+
+    # ============================
+    # 3) Crear Dataset completo
     # ============================
     dataset = QM9SDFDataset(
         sdf_path=dataset_cfg["sdf"],
         csv_path=dataset_cfg["csv"],
-        target_col=dataset_cfg.get("target", "u0")
+        target_col=dataset_cfg.get("target", "u0"),
     )
 
     # ============================
-    # 3) Submuestreo (opcional)
+    # 4) Submuestreo (opcional)
     # ============================
     sample_size = cfg.get("sample_size", None)
 
     if sample_size is not None:
-        random.seed(42)
+        random.seed(seed)
         total = len(dataset)
         sample_size = min(sample_size, total)
 
@@ -60,19 +67,14 @@ if __name__ == "__main__":
         print(f"[INFO] Usando {sample_size} muestras aleatorias de {total} disponibles.")
 
     # ============================
-    # 4) Fix seed y preparación
-    # ============================
-    seed = cfg.get("seed", 42)
-    set_seed(seed)
-
-    # ============================
     # 5) Split train/val
     # ============================
     n_total = len(dataset)
     n_train = int(n_total * (1 - cfg["validation_split"]))
     n_val = n_total - n_train
 
-    train_ds, val_ds = random_split(dataset, [n_train, n_val])
+    split_generator = torch.Generator().manual_seed(seed)
+    train_ds, val_ds = random_split(dataset, [n_train, n_val], generator=split_generator)
     print(f"[INFO] Train: {n_train} | Val: {n_val}")
 
     # ============================
@@ -80,6 +82,7 @@ if __name__ == "__main__":
     # ============================
     num_workers = cfg.get("num_workers", 4)
     pin_memory = torch.cuda.is_available()
+    persistent_workers = num_workers > 0
 
     train_dl = DataLoader(
         train_ds,
@@ -88,6 +91,7 @@ if __name__ == "__main__":
         collate_fn=collate_mol,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
     )
 
     val_dl = DataLoader(
@@ -96,6 +100,7 @@ if __name__ == "__main__":
         collate_fn=collate_mol,
         num_workers=max(1, num_workers // 2),
         pin_memory=pin_memory,
+        persistent_workers=persistent_workers if max(1, num_workers // 2) > 0 else False,
     )
 
     # ============================
@@ -130,6 +135,7 @@ if __name__ == "__main__":
         lr=float(cfg["learning_rate"]),
         max_epochs=cfg["max_epochs"],
         ckpt_dir="checkpoints",
+        log_dir="logs",
         hparams=hparams,
     )
 
@@ -137,7 +143,3 @@ if __name__ == "__main__":
     # 9) Ejecutar entrenamiento
     # ============================
     trainer.fit()
-
-
-
-

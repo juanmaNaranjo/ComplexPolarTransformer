@@ -8,20 +8,20 @@
   "batch_size": 16,
   "num_samples": 12197,
   "metrics": {
-    "mse": 15.884859085083008,
-    "rmse": 3.9855813986271826,
-    "mae_raw": 2.918600559234619,
-    "mae_mev": 126.56249890354613,
-    "mae_kcal_mol": 2.918600559234619,
-    "r2": 0.9997231960296631
+    "mse": 137.2844696044922,
+    "rmse": 11.716845548375732,
+    "mae_raw": 8.882627487182617,
+    "mae_mev": 241708.607432956,
+    "mae_kcal_mol": 5573.932902219905,
+    "r2": 0.9976077675819397
   },
   "performance": {
-    "inference_total_sec": 216.77837289997842,
-    "inference_ms_per_sample": 17.773089522011844,
-    "samples_per_sec": 56.26483784721319,
-    "param_count": 1353223,
-    "model_size_mb": 5.162136077880859,
-    "peak_gpu_mem_mb": 22.38232421875
+    "inference_total_sec": 74.19226089998847,
+    "inference_ms_per_sample": 6.082828638188774,
+    "samples_per_sec": 164.39720062503037,
+    "param_count": 268291,
+    "model_size_mb": 1.0234489440917969,
+    "peak_gpu_mem_mb": 13.7548828125
   },
   "split_meta": {
     "seed": 42,
@@ -132235,5 +132235,5 @@
       56941
     ]
   },
-  "timestamp": "2026-04-23 21:21:49"
+  "timestamp": "2026-04-05 09:58:00"
 }
