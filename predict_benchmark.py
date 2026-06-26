@@ -241,7 +241,7 @@ def predict(args):
             raise ValueError("Checkpoint parece multi-target. Usa --force-first-target solo para depuración.")
 
     normalize_target = bool(ckpt.get("normalize_target", True)) if isinstance(ckpt, dict) else True
-    per_atom_norm = bool(ckpt.get("per_atom_norm", False)) if isinstance(ckpt, dict) else False
+    per_atom_norm = bool(ckpt.get("per_atom_norm", True)) if isinstance(ckpt, dict) else True
 
     print(f"[INFO] normalize_target={normalize_target} | per_atom_norm={per_atom_norm}")
     if per_atom_norm:

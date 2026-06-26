@@ -6,7 +6,6 @@ from .complex_layers import (
     ComplexEmbedding,
     ComplexPolarAttention,
     ComplexMessagePassing,
-    RealProjection,
     ShiftedSoftplus,
     ModReLU,
 )
@@ -105,8 +104,8 @@ class ComplexPolarTransformerBeta(nn.Module):
             self.layer_norms = None
 
         self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
-        self.out_proj = RealProjection(self.hidden_dim, self.hidden_dim)
 
+        # pool_dim = 2H: cat([real_mean, imag_mean]) del pooling cartesiano
         pool_dim = self.hidden_dim * 2
         self.out_head = nn.Sequential(
             nn.Linear(pool_dim, self.hidden_dim),
@@ -161,18 +160,31 @@ class ComplexPolarTransformerBeta(nn.Module):
                     z_new = self.mp_layers[layer_idx](z_new, ei, rbf, coords_cart=cart)
 
                 if self.use_residuals:
-                    z_new.magnitude = z_new.magnitude + z.magnitude
-                    z_new.phase = z_new.phase + z.phase
+                    # Suma compleja correcta en espacio cartesiano.
+                    # z_new + z ≠ (r_new+r, θ_new+θ): la suma de magnitudes y fases
+                    # no corresponde a adición de números complejos.
+                    r, theta = z.magnitude, z.phase
+                    r_new, theta_new = z_new.magnitude, z_new.phase
+                    res_real = r_new * torch.cos(theta_new) + r * torch.cos(theta)
+                    res_imag = r_new * torch.sin(theta_new) + r * torch.sin(theta)
+                    z_new.magnitude = torch.sqrt(res_real ** 2 + res_imag ** 2 + 1e-9)
+                    z_new.phase = torch.atan2(res_imag, res_real)
 
                 if self.use_layernorm and self.layer_norms is not None:
-                    z_new.magnitude = self.layer_norms[layer_idx](z_new.magnitude)
+                    # LayerNorm estabiliza la escala; abs garantiza no-negatividad.
+                    z_new.magnitude = torch.abs(
+                        self.layer_norms[layer_idx](z_new.magnitude)
+                    ).clamp_min(1e-9)
 
                 z_new = self.complex_activations[layer_idx](z_new)
                 z_new.magnitude = self.dropout(z_new.magnitude)
                 z = z_new
 
-            atom_repr = self.out_proj(z)
-            mol_repr = torch.cat([atom_repr.mean(dim=0), atom_repr.sum(dim=0)], dim=-1)
+            # Pooling en espacio cartesiano — preserva información de fase hasta el head.
+            # mean(real) + mean(imag) mantiene pool_dim = 2H igual que antes.
+            z_real = z.magnitude * torch.cos(z.phase)    # [N, H]
+            z_imag = z.magnitude * torch.sin(z.phase)    # [N, H]
+            mol_repr = torch.cat([z_real.mean(dim=0), z_imag.mean(dim=0)], dim=-1)  # [2H]
             mol_outputs.append(mol_repr)
 
         return self.out_head(torch.stack(mol_outputs))

@@ -66,7 +66,9 @@ class Trainer:
         self.model.to(self.device)
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
-        self.loss_fn = torch.nn.MSELoss()
+        # L1Loss (MAE) como objetivo de entrenamiento. El benchmark QM9 evalúa MAE;
+        # entrenar con MSE sesga el modelo hacia reducir outliers a costa del error medio.
+        self.loss_fn = torch.nn.L1Loss()
 
         os.makedirs(ckpt_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
@@ -76,6 +78,7 @@ class Trainer:
         self.hparams = hparams or {}
         self.grad_clip = grad_clip
         self.best_val = float("inf")
+        self.best_val_mae = float("inf")
         self.patience = patience
         self.min_delta = min_delta
         self.wait = 0
@@ -253,20 +256,24 @@ class Trainer:
                 pred = pred.unsqueeze(-1)
 
             loss = self.loss_fn(pred, batch["y"])
-            self.optimizer.zero_grad()
+            # set_to_none=True libera tensores de gradiente en lugar de zerofill:
+            # reduce ~15-30% la presión de memoria durante el paso de optimización.
+            self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
             if self.grad_clip:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
             self.optimizer.step()
-            total_loss += loss.item()
+            # Acumular pérdida ponderada por muestra para reportar correctamente
+            # cuando el último batch tiene menos muestras que batch_size.
+            total_loss += loss.item() * batch["y"].shape[0]
 
         if self.device == "cuda":
             torch.cuda.synchronize()
         elapsed = time.perf_counter() - t0
 
-        return total_loss / max(len(self.train_dl), 1), {
+        return total_loss / max(samples_seen, 1), {
             "train_time_sec": elapsed,
             "train_samples": samples_seen,
             "train_samples_per_sec": samples_seen / max(elapsed, 1e-9),
@@ -293,7 +300,7 @@ class Trainer:
                     pred = pred.unsqueeze(-1)
 
                 loss = self.loss_fn(pred, batch["y"])
-                total_loss += loss.item()
+                total_loss += loss.item() * batch["y"].shape[0]
 
                 preds.append(self._denormalize(pred, batch).cpu())
                 targets.append(self._denormalize(batch["y"], batch).cpu())
@@ -306,7 +313,7 @@ class Trainer:
         targets = torch.cat(targets, dim=0)
         metrics = evaluate_regression(preds, targets)
 
-        return total_loss / max(len(dl), 1), metrics, {
+        return total_loss / max(samples_seen, 1), metrics, {
             "time_sec": elapsed,
             "samples": samples_seen,
             "samples_per_sec": samples_seen / max(elapsed, 1e-9),
@@ -319,7 +326,13 @@ class Trainer:
         torch.save(
             {
                 "model": self.model.state_dict(),
+                # optimizer y scheduler se guardan para poder reanudar sin perder
+                # momentos de AdamW ni el conteo interno de ReduceLROnPlateau.
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict() if self.scheduler is not None else None,
                 "epoch": epoch,
+                "best_val_mae": self.best_val_mae,
+                "wait": self.wait,
                 "y_mean": self.y_mean,
                 "y_std": self.y_std,
                 "normalize_target": self.normalize_target,
@@ -342,11 +355,14 @@ class Trainer:
                 torch.cuda.synchronize()
 
             epoch_t0 = time.perf_counter()
-            train_mse, train_perf = self.train_epoch()
-            val_mse, metrics, val_perf = self.val_epoch()
+            train_loss, train_perf = self.train_epoch()
+            val_loss, metrics, val_perf = self.val_epoch()
+            val_mae_current = metrics.get("mae", float("inf"))
 
+            # Scheduler y early stopping monitorizan val MAE físico (kcal/mol desnorm),
+            # no val MSE normalizado. MAE óptimo ≠ MSE óptimo.
             if self.scheduler is not None:
-                self.scheduler.step(val_mse)
+                self.scheduler.step(val_mae_current)
 
             lr_now = float(self.optimizer.param_groups[0]["lr"])
 
@@ -362,7 +378,7 @@ class Trainer:
 
             msg = (
                 f"Epoch {epoch}/{self.max_epochs} | "
-                f"Train MSE {train_mse:.4f} | Val MSE {val_mse:.4f} | "
+                f"Train L1 {train_loss:.4f} | Val L1 {val_loss:.4f} | "
                 f"Val MAE {mae_val:.4f} | Val R2 {r2_val:.6f} | "
                 f"LR {lr_now:.2e} | Time {epoch_time_sec:.2f}s | "
                 f"Train {train_perf['train_samples_per_sec']:.0f} s/s | "
@@ -372,16 +388,18 @@ class Trainer:
                 msg += f" | GPU {peak_gpu_mem_mb:.1f} MB"
             print(msg)
 
-            if val_mse < self.best_val - self.min_delta:
-                self.best_val = val_mse
+            # Early stopping sobre val MAE físico (kcal/mol), no sobre la pérdida normalizada.
+            if val_mae_current < self.best_val_mae - self.min_delta:
+                self.best_val_mae = val_mae_current
+                self.best_val = val_loss
                 self.wait = 0
                 self.save_ckpt(epoch)
             else:
                 self.wait += 1
 
             self.history["epoch"].append(epoch)
-            self.history["train_mse"].append(train_mse)
-            self.history["val_mse"].append(val_mse)
+            self.history["train_mse"].append(train_loss)
+            self.history["val_mse"].append(val_loss)
             self.history["epoch_time_sec"].append(epoch_time_sec)
             self.history["train_samples_per_sec"].append(train_perf["train_samples_per_sec"])
             self.history["val_samples_per_sec"].append(val_perf["samples_per_sec"])
@@ -391,8 +409,8 @@ class Trainer:
             with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow([
                     epoch,
-                    train_mse,
-                    val_mse,
+                    train_loss,
+                    val_loss,
                     epoch_time_sec,
                     train_perf["train_samples_per_sec"],
                     val_perf["samples_per_sec"],
@@ -401,7 +419,7 @@ class Trainer:
                 ])
 
             if self.wait >= self.patience:
-                print(f"[EARLY STOPPING] Mejor Val MSE: {self.best_val:.6f}")
+                print(f"[EARLY STOPPING] Mejor Val MAE: {self.best_val_mae:.6f} kcal/mol")
                 break
 
         self.plot()

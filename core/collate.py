@@ -49,7 +49,7 @@ def pyg_collate(batch):
         "coords_spherical": torch.cat(coords_spherical, dim=0),
         "atom_types": torch.cat(atom_types, dim=0),
         "edge_index": torch.cat(edge_index, dim=1) if edge_index else torch.empty((2, 0), dtype=torch.long),
-        "edge_attr": torch.cat(edge_attr, dim=0) if edge_attr else torch.empty((0, 4), dtype=torch.float32),
+        "edge_attr": torch.cat(edge_attr, dim=0) if edge_attr else torch.empty((0, 1), dtype=torch.float32),
         "batch": torch.cat(batch_index, dim=0),
         "y": torch.stack(y),
     }

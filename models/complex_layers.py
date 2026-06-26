@@ -41,17 +41,17 @@ class ModReLU(nn.Module):
         self.bias = nn.Parameter(torch.full((self.hidden_dim,), float(init_bias)))
 
     def forward(self, cpx: ComplexTensor) -> ComplexTensor:
-        z = cpx.as_cartesian()
-        radius = torch.abs(z)
-        phase = torch.angle(z)
+        # Usa cpx.magnitude y cpx.phase directamente.
+        # Elimina el round-trip polar→cartesiano→polar (4 trig calls por elemento)
+        # y los NaN en gradientes de torch.angle(z) cuando |z|→0.
+        radius = cpx.magnitude.clamp_min(0.0)
+        phase = cpx.phase
 
-        # Convencion estable: para z=0 la salida es 0, evitando division por |z|.
         nonzero = (radius > self.eps).to(radius.dtype)
         activated_radius = F.relu(radius + self.bias) * nonzero
 
-        # La fase solo importa cuando la magnitud es activa.
-        active = (activated_radius > 0).to(phase.dtype)
-        activated_phase = phase * active
+        active = activated_radius > 0
+        activated_phase = torch.where(active, phase, torch.zeros_like(phase))
 
         return ComplexTensor(activated_radius, activated_phase)
 
@@ -85,7 +85,8 @@ class RBFExpansion(nn.Module):
             spacing = self.cutoff
         else:
             spacing = self.cutoff / (self.num_rbf - 1)
-        self.gamma = 1.0 / (spacing ** 2)
+        # Buffer para que gamma viaje con el modelo al serializar/mover devices.
+        self.register_buffer("gamma", torch.tensor(1.0 / (spacing ** 2)))
 
     def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
         if edge_attr is None:
@@ -222,11 +223,11 @@ class ComplexMessagePassing(nn.Module):
 
     def _edge_angular_features(self, coords_cart: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """
-        Calcula un descriptor angular por arista dirigida j->i.
+        Calcula descriptor angular por arista dirigida j→i.
 
-        Para cada arista e=(j->i), se buscan las demás aristas k->i que llegan
-        al mismo átomo central i. Se calcula theta_jik y se promedia su expansión
-        angular. Resultado: [E, num_angle_basis].
+        v10: sort edges by destination (O(E log E)) en lugar de
+        torch.nonzero(dst == center) O(N×E) dentro del loop por átomo central.
+        Resultado: [E, num_angle_basis].
         """
         src, dst = edge_index[0], edge_index[1]
         e_count = int(edge_index.shape[1])
@@ -237,17 +238,24 @@ class ComplexMessagePassing(nn.Module):
         if e_count == 0:
             return out
 
-        # QM9 es pequeño; este bucle por átomo central es suficientemente barato
-        # y evita añadir dependencias externas como torch_scatter.
-        for center in torch.unique(dst).tolist():
-            incoming = torch.nonzero(dst == center, as_tuple=False).view(-1)
-            m = int(incoming.numel())
+        # Ordenar aristas por destino: O(E log E) único, luego acceso O(m) por centro.
+        order = torch.argsort(dst)
+        src_sorted = src[order]
+        dst_sorted = dst[order]
+        unique_centers, counts = torch.unique_consecutive(dst_sorted, return_counts=True)
+
+        edge_offset = 0
+        for center, m in zip(unique_centers.tolist(), counts.tolist()):
+            m = int(m)
             if m < 2:
+                edge_offset += m
                 continue
 
-            neighbors = src[incoming]
+            incoming = order[edge_offset : edge_offset + m]   # índices originales de aristas
+            neighbors = src_sorted[edge_offset : edge_offset + m]
+
             center_coord = coords_cart[int(center)].view(1, 3)
-            vec = coords_cart[neighbors] - center_coord  # [m, 3]
+            vec = coords_cart[neighbors] - center_coord        # [m, 3]
             norm = torch.norm(vec, dim=-1, keepdim=True).clamp_min(1e-8)
             vec = vec / norm
 
@@ -258,6 +266,8 @@ class ComplexMessagePassing(nn.Module):
             denom = float(max(m - 1, 1))
             avg_basis = (basis_mat * mask).sum(dim=1) / denom  # [m, K]
             out[incoming] = avg_basis.to(dtype)
+
+            edge_offset += m
 
         return out
 
@@ -275,6 +285,7 @@ class ComplexMessagePassing(nn.Module):
         phase = cpx.phase
         src, dst = edge_index[0], edge_index[1]
 
+        # Construir mensajes en forma polar
         msg_mag = self.edge_to_mag(rbf) * mag[src]
         msg_phase = self.edge_to_phase(rbf) * self.phase_scale + phase[src]
 
@@ -285,27 +296,42 @@ class ComplexMessagePassing(nn.Module):
             angle_mag = self.angle_to_mag(angle_feat)
             angle_phase = self.angle_to_phase(angle_feat)
 
-            # Modulación residual estable: mantiene el componente radial y agrega
-            # corrección angular aprendible.
             msg_mag = msg_mag * (1.0 + self.angular_mag_scale * angle_mag)
             msg_phase = msg_phase + self.angular_phase_scale * math.pi * angle_phase
 
-        agg_mag = torch.zeros_like(mag)
-        agg_phase = torch.zeros_like(phase)
-        agg_mag.scatter_add_(0, dst.unsqueeze(1).expand_as(msg_mag), msg_mag)
-        agg_phase.scatter_add_(0, dst.unsqueeze(1).expand_as(msg_phase), msg_phase)
+        # Agregar en espacio CARTESIANO — corrige el promedio aritmético de fases
+        # (cantidad circular): suma aritmética de ángulos es incorrecta cerca de ±π.
+        msg_real = msg_mag * torch.cos(msg_phase)
+        msg_imag = msg_mag * torch.sin(msg_phase)
 
-        # Normalización por grado: necesaria al subir cutoff a 10 Å, porque el
-        # grafo se vuelve mucho más denso y la suma cruda puede explotar.
+        agg_real = torch.zeros_like(mag)
+        agg_imag = torch.zeros_like(mag)
+        agg_real.scatter_add_(0, dst.unsqueeze(1).expand_as(msg_real), msg_real)
+        agg_imag.scatter_add_(0, dst.unsqueeze(1).expand_as(msg_imag), msg_imag)
+
+        # Normalizar por grado en espacio cartesiano
         deg = torch.zeros((mag.shape[0], 1), dtype=mag.dtype, device=mag.device)
         deg.scatter_add_(0, dst.unsqueeze(1), torch.ones((dst.shape[0], 1), dtype=mag.dtype, device=mag.device))
         deg = deg.clamp_min(1.0)
-        agg_mag = agg_mag / deg
-        agg_phase = agg_phase / deg
+        agg_real = agg_real / deg
+        agg_imag = agg_imag / deg
+
+        # Magnitud del agregado (para el gate y la norma)
+        agg_mag = torch.sqrt(agg_real ** 2 + agg_imag ** 2 + 1e-9)
+
+        # Actualización con gate en espacio cartesiano
+        current_real = mag * torch.cos(phase)
+        current_imag = mag * torch.sin(phase)
 
         gate = self.update_gate(torch.cat([mag, agg_mag], dim=-1))
-        new_mag = self.norm_mag(mag + gate * agg_mag)
-        new_phase = phase + gate * agg_phase
+        new_real = current_real + gate * agg_real
+        new_imag = current_imag + gate * agg_imag
+
+        # Normalizar magnitud: abs(LayerNorm) preserva gradientes y garantiza no-negatividad.
+        # LayerNorm estabiliza la escala; abs refleja valores negativos en lugar de matarlos.
+        new_mag_raw = torch.sqrt(new_real ** 2 + new_imag ** 2 + 1e-9)
+        new_mag = torch.abs(self.norm_mag(new_mag_raw)).clamp_min(1e-9)
+        new_phase = torch.atan2(new_imag, new_real)
 
         return ComplexTensor(new_mag, new_phase)
 
@@ -341,19 +367,28 @@ class ComplexPolarAttention(nn.Module):
         mag = cpx.magnitude
         phase = cpx.phase
 
-        phase_diff = phase.unsqueeze(1) - phase.unsqueeze(0)
-        mag_prod = mag.unsqueeze(1) * mag.unsqueeze(0)
-        scores = torch.sum(mag_prod * torch.cos(phase_diff), dim=-1) / self.scale
+        # Score = parte real del producto Hermitiano: Re(<z_i, conj(z_j)>)
+        phase_diff = phase.unsqueeze(1) - phase.unsqueeze(0)   # [N, N, H]
+        mag_prod = mag.unsqueeze(1) * mag.unsqueeze(0)          # [N, N, H]
+        scores = torch.sum(mag_prod * torch.cos(phase_diff), dim=-1) / self.scale  # [N, N]
 
         if edge_index is not None and rbf is not None and edge_index.numel() > 0 and rbf.numel() > 0:
             bias_vals = self.edge_bias(rbf)
             i_idx, j_idx = edge_index[0], edge_index[1]
             scores = scores.clone()
-            scores[i_idx, j_idx] += bias_vals
+            scores[i_idx, j_idx] = scores[i_idx, j_idx] + bias_vals
 
-        attn_weights = F.softmax(scores, dim=1)
-        new_mag = torch.matmul(attn_weights, mag)
-        new_phase = torch.matmul(attn_weights, phase)
+        attn_weights = F.softmax(scores, dim=1)   # [N, N]
+
+        # Agregar en espacio CARTESIANO — corrige el promedio aritmético de fases.
+        # matmul(attn, phase) es incorrecto para cantidades circulares cerca de ±π.
+        real = mag * torch.cos(phase)                     # [N, H]
+        imag = mag * torch.sin(phase)                     # [N, H]
+        new_real = torch.matmul(attn_weights, real)       # [N, H]
+        new_imag = torch.matmul(attn_weights, imag)       # [N, H]
+
+        new_mag = torch.sqrt(new_real ** 2 + new_imag ** 2 + 1e-9)
+        new_phase = torch.atan2(new_imag, new_real)
 
         return ComplexTensor(new_mag, new_phase)
 
@@ -366,5 +401,7 @@ class RealProjection(nn.Module):
         self.lin = nn.Linear(dim * 2, out_dim)
 
     def forward(self, cpx: ComplexTensor) -> torch.Tensor:
-        z = cpx.as_cartesian()
-        return self.lin(torch.cat([z.real, z.imag], dim=-1))
+        # Calcula real/imag directamente sin crear un tensor complejo intermedio.
+        real = cpx.magnitude * torch.cos(cpx.phase)
+        imag = cpx.magnitude * torch.sin(cpx.phase)
+        return self.lin(torch.cat([real, imag], dim=-1))
