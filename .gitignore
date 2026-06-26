@@ -3,6 +3,7 @@
 # =========================
 venv/
 .env/
+env/
 complex-polar-env/
 
 # =========================
@@ -16,16 +17,28 @@ data/
 *.ckpt
 
 # =========================
-# Modelos y checkpoints
+# Modelos y checkpoints (cualquier variante de nombre)
 # =========================
-checkpoints/
+checkpoints*/
+best_model*/
 runs/
-logs/
+*.zip
 
 # =========================
-# PyTorch / binarios
+# Logs, resultados y artefactos generados
 # =========================
-*.dll
+logs*/
+results/
+*.png
+
+# =========================
+# Documentos de sesión / auditoría (no van al repo)
+# =========================
+PROJECT_CONTEXT.md
+REFACTOR_REQUEST.md
+*_CONTEXT.md
+*_REQUEST.md
+AUDIT_*.md
 
 # =========================
 # Python
@@ -39,3 +52,12 @@ __pycache__/
 # Jupyter
 # =========================
 .ipynb_checkpoints/
+
+# =========================
+# Sistema / IDEs
+# =========================
+*.dll
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
