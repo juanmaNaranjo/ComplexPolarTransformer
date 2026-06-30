@@ -265,7 +265,10 @@ class ComplexPolarAttention(nn.Module):
             if rbf is not None and rbf.numel() > 0:
                 bias = self.edge_bias(rbf)                    # [E, nh]
                 bias_full = scores.new_zeros(N, N, nh)
-                bias_full[i_idx, j_idx, :] = bias
+                # AMP: torch.cos() produce float32 aunque la entrada sea float16,
+                # por lo que scores (y bias_full) quedan en float32, pero Linear
+                # (edge_bias) produce float16. Cast explícito evita el RuntimeError.
+                bias_full[i_idx, j_idx, :] = bias.to(bias_full.dtype)
                 scores = scores + bias_full
 
         attn_weights = F.softmax(scores, dim=1)               # [N,N,nh]
