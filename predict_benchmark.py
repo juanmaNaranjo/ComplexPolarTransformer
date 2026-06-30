@@ -3,6 +3,8 @@ import json
 import os
 import time
 
+import matplotlib
+matplotlib.use('Agg')  # backend sin GUI: seguro en entornos headless y DataLoader workers
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -54,21 +56,23 @@ def load_checkpoint(model_path, device):
 
 def extract_model_config(ckpt, defaults=None):
     defaults = defaults or {
-        "in_dim": 5,
+        # v11 defaults — checkpoint hparams["model"] sobreescribe estos valores
+        "in_dim": 12,
         "hidden_dim": 256,
         "out_dim": 1,
-        "num_hidden_layers": 3,
-        "num_rbf": 50,
+        "num_hidden_layers": 4,
+        "num_heads": 4,
+        "num_rbf": 64,
         "cutoff": 5.0,
         "edge_dim": 4,
         "dropout": 0.0,
-        "use_residuals": False,
-        "use_layernorm": False,
+        "use_residuals": True,
+        "use_layernorm": True,
         "activation": "modrelu",
-        "modrelu_init_bias": -0.1,
+        "modrelu_init_bias": 0.0,
         "modrelu_eps": 1e-8,
-        "use_angular": False,
-        "num_angle_basis": 16,
+        "use_angular": True,
+        "num_angle_basis": 32,
         "angular_scale_init": 0.1,
     }
     model_cfg = defaults.copy()
@@ -85,21 +89,22 @@ def build_model_from_ckpt(ckpt, state_dict, allow_partial_load=False):
     model_cfg = extract_model_config(ckpt)
 
     model = ComplexPolarTransformerBeta(
-        in_dim=int(model_cfg.get("in_dim", 5)),
+        in_dim=int(model_cfg.get("in_dim", 12)),
         hidden_dim=int(model_cfg.get("hidden_dim", 256)),
         out_dim=int(model_cfg.get("out_dim", 1)),
-        num_hidden_layers=int(model_cfg.get("num_hidden_layers", 3)),
-        num_rbf=int(model_cfg.get("num_rbf", 50)),
+        num_hidden_layers=int(model_cfg.get("num_hidden_layers", 4)),
+        num_heads=int(model_cfg.get("num_heads", 4)),
+        num_rbf=int(model_cfg.get("num_rbf", 64)),
         cutoff=float(model_cfg.get("cutoff", 5.0)),
         edge_dim=int(model_cfg.get("edge_dim", 4)),
         dropout=float(model_cfg.get("dropout", 0.0)),
-        use_residuals=bool(model_cfg.get("use_residuals", False)),
-        use_layernorm=bool(model_cfg.get("use_layernorm", False)),
+        use_residuals=bool(model_cfg.get("use_residuals", True)),
+        use_layernorm=bool(model_cfg.get("use_layernorm", True)),
         activation=str(model_cfg.get("activation", "modrelu")),
-        modrelu_init_bias=float(model_cfg.get("modrelu_init_bias", -0.1)),
+        modrelu_init_bias=float(model_cfg.get("modrelu_init_bias", 0.0)),
         modrelu_eps=float(model_cfg.get("modrelu_eps", 1e-8)),
-        use_angular=bool(model_cfg.get("use_angular", False)),
-        num_angle_basis=int(model_cfg.get("num_angle_basis", 16)),
+        use_angular=bool(model_cfg.get("use_angular", True)),
+        num_angle_basis=int(model_cfg.get("num_angle_basis", 32)),
         angular_scale_init=float(model_cfg.get("angular_scale_init", 0.1)),
     )
 

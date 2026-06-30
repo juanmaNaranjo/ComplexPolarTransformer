@@ -203,7 +203,8 @@ if __name__ == "__main__":
         hidden_dim=int(model_cfg["hidden_dim"]),
         out_dim=int(model_cfg.get("out_dim", 1)),
         num_hidden_layers=int(model_cfg.get("num_hidden_layers", 1)),
-        num_rbf=int(model_cfg.get("num_rbf", 50)),
+        num_heads=int(model_cfg.get("num_heads", 4)),
+        num_rbf=int(model_cfg.get("num_rbf", 64)),
         cutoff=cutoff,
         edge_dim=int(model_cfg.get("edge_dim", 4)),
         dropout=float(model_cfg.get("dropout", 0.0)),
@@ -217,8 +218,10 @@ if __name__ == "__main__":
         angular_scale_init=float(model_cfg.get("angular_scale_init", 0.1)),
     )
 
-    early = cfg.get("early_stopping", {}) or {}
-    sched = cfg.get("scheduler", None)
+    early    = cfg.get("early_stopping", {}) or {}
+    sched    = cfg.get("scheduler",      None)
+    ema_cfg  = cfg.get("ema",            {}) or {}
+    amp_cfg  = cfg.get("amp",            {}) or {}
 
     hparams = {
         "model": model_cfg,
@@ -243,6 +246,7 @@ if __name__ == "__main__":
         val_dl=val_dl,
         test_dl=test_dl,
         lr=float(cfg["learning_rate"]),
+        weight_decay=float(cfg.get("weight_decay", 1e-4)),
         max_epochs=int(cfg["max_epochs"]),
         ckpt_dir=cfg.get("ckpt_dir", "checkpoints"),
         log_dir=cfg.get("log_dir", "logs"),
@@ -253,6 +257,10 @@ if __name__ == "__main__":
         patience=int(early.get("patience", 30)),
         min_delta=float(early.get("min_delta", 5e-4)),
         scheduler_cfg=sched,
+        use_ema=bool(ema_cfg.get("enabled", True)),
+        ema_decay=float(ema_cfg.get("decay", 0.999)),
+        use_amp=bool(amp_cfg.get("enabled", True)),
+        phase_reg_weight=float(cfg.get("phase_reg_weight", 0.0)),
     )
 
     trainer.fit()
