@@ -197,13 +197,30 @@ class ComplexPolarTransformerBeta(nn.Module):
                 ei  = None
                 rbf = None
 
+            # Pre-computar features angulares UNA vez por molécula.
+            # Los ángulos cos(θ_jik) dependen solo de coords_cart y edge_index,
+            # que son constantes entre capas → recomputarlos en cada capa es
+            # un desperdicio O(capas) de bucles Python (el cuello de botella principal).
+            if self.use_angular and ei is not None and cart is not None:
+                with torch.no_grad():
+                    # AngularBasis no tiene parámetros learnable → no se necesita gradiente
+                    angle_feat = self.mp_layers[0]._edge_angular_features(
+                        cart.float(), ei
+                    ).to(feats.device)
+            else:
+                angle_feat = None
+
             for layer_idx in range(self.num_hidden_layers):
                 # Atención multi-head con Q/K/V y edge-masking geométrico
                 z_new = self.attn_layers[layer_idx](z, edge_index=ei, rbf=rbf)
 
-                # Paso de mensajes (radial + angular si use_angular=True)
+                # Paso de mensajes (radial + angular precomputado)
                 if ei is not None and rbf is not None:
-                    z_new = self.mp_layers[layer_idx](z_new, ei, rbf, coords_cart=cart)
+                    z_new = self.mp_layers[layer_idx](
+                        z_new, ei, rbf,
+                        coords_cart=cart,
+                        precomputed_angle_feat=angle_feat,
+                    )
 
                 # Residual complejo en espacio cartesiano
                 if self.use_residuals:

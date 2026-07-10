@@ -244,10 +244,18 @@ class ComplexPolarAttention(nn.Module):
         v_phase = (torch.tanh(self.W_V_phase(phase)) * math.pi).view(N, nh, hd)
 
         # ── Score Hermítico asimétrico: Re(Q_i·conj(K_j))/√hd ───────────
-        # [N,N,nh,hd] sum sobre hd → [N,N,nh]
-        pdiff    = q_phase.unsqueeze(1) - k_phase.unsqueeze(0)   # [N,N,nh,hd]
-        mag_prod = q_mag.unsqueeze(1)   * k_mag.unsqueeze(0)     # [N,N,nh,hd]
-        scores   = (mag_prod * torch.cos(pdiff)).sum(-1) / self.scale  # [N,N,nh]
+        # Re(Q·K†) = q_real·k_real + q_imag·k_imag  (por componentes)
+        # Implementación con einsum evita materializar [N,N,nh,hd]:
+        #   Antes: 2×[N,N,nh,hd] ≈ 660 KB/capa/molécula → presión de memoria GPU.
+        #   Ahora:  [N,nh,hd] inputs + [N,N,nh] output ≈ 41 KB → 16× menos.
+        q_real = q_mag * torch.cos(q_phase)   # [N, nh, hd]
+        q_imag = q_mag * torch.sin(q_phase)
+        k_real = k_mag * torch.cos(k_phase)
+        k_imag = k_mag * torch.sin(k_phase)
+        scores = (
+            torch.einsum("ihd,jhd->ijh", q_real, k_real) +
+            torch.einsum("ihd,jhd->ijh", q_imag, k_imag)
+        ) / self.scale                                             # [N, N, nh]
 
         # ── Edge-masking ─────────────────────────────────────────────────
         if edge_index is not None and edge_index.numel() > 0:
@@ -413,11 +421,17 @@ class ComplexMessagePassing(nn.Module):
 
     def forward(
         self,
-        cpx:        ComplexTensor,
-        edge_index: torch.Tensor,
-        rbf:        torch.Tensor,
-        coords_cart: torch.Tensor = None,
+        cpx:                   ComplexTensor,
+        edge_index:            torch.Tensor,
+        rbf:                   torch.Tensor,
+        coords_cart:           torch.Tensor = None,
+        precomputed_angle_feat: torch.Tensor = None,
     ) -> ComplexTensor:
+        """
+        precomputed_angle_feat: features angulares ya calculadas externamente [E, K].
+        Si se pasa, se usa directamente (evita recalcular por capa).
+        Si es None y use_angular=True, se recalcula a partir de coords_cart.
+        """
         if edge_index is None or rbf is None or edge_index.numel() == 0 or rbf.numel() == 0:
             return cpx
 
@@ -428,13 +442,21 @@ class ComplexMessagePassing(nn.Module):
         msg_mag   = self.edge_to_mag(rbf) * mag[src]
         msg_phase = self.edge_to_phase(rbf) * self.phase_scale + phase[src]
 
-        if self.use_angular and coords_cart is not None:
-            angle_feat = self._edge_angular_features(coords_cart.float(), edge_index)
-            angle_feat = angle_feat.to(device=mag.device, dtype=mag.dtype)
-            angle_mag   = self.angle_to_mag(angle_feat)
-            angle_phase = self.angle_to_phase(angle_feat)
-            msg_mag   = msg_mag   * (1.0 + self.angular_mag_scale   * angle_mag)
-            msg_phase = msg_phase + self.angular_phase_scale * math.pi * angle_phase
+        if self.use_angular:
+            # Usar features precomputadas si están disponibles (evita bucle Python por capa)
+            if precomputed_angle_feat is not None:
+                angle_feat = precomputed_angle_feat
+            elif coords_cart is not None:
+                angle_feat = self._edge_angular_features(coords_cart.float(), edge_index)
+                angle_feat = angle_feat.to(device=mag.device, dtype=mag.dtype)
+            else:
+                angle_feat = None
+
+            if angle_feat is not None:
+                angle_mag   = self.angle_to_mag(angle_feat)
+                angle_phase = self.angle_to_phase(angle_feat)
+                msg_mag   = msg_mag   * (1.0 + self.angular_mag_scale   * angle_mag)
+                msg_phase = msg_phase + self.angular_phase_scale * math.pi * angle_phase
 
         # Agregar en espacio CARTESIANO — corrige circular mean de fases
         msg_real = msg_mag * torch.cos(msg_phase)
