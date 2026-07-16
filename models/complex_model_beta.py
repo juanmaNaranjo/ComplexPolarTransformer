@@ -1,202 +1,178 @@
-from .complex_layers import ComplexEmbedding, ComplexPolarAttention, RealProjection
 import torch
 import torch.nn as nn
-import math
+
+from .complex_layers import (
+    RBFExpansion,
+    ComplexEmbedding,
+    ComplexPolarAttention,
+    ComplexMessagePassing,
+    RealProjection,
+    ShiftedSoftplus,
+    ModReLU,
+)
 
 
 class ComplexPolarTransformerBeta(nn.Module):
     """
-    Transformer complejo-polar para predicción de propiedades moleculares.
+    ComplexPolarTransformer benchmark-ready.
 
-    Mejoras sobre la versión anterior:
-
-    CAMBIO 1 — Scaling sqrt(D) en atención:
-        El score de atención ahora se divide por sqrt(hidden_dim) antes
-        del softmax. Sin esto, los scores crecen con la dimensión y
-        saturan la función softmax, colapsando los gradientes hacia cero.
-        Referencia: Vaswani et al. (2017), Attention Is All You Need.
-
-    CAMBIO 2 — Pooling mean + sum:
-        La versión anterior usaba solo sum(). Esto hace que la predicción
-        dependa del número de átomos: una molécula con 10 átomos siempre
-        predice valores mayores que una con 5. El pooling mean es invariante
-        al tamaño, pero pierde información de extensividad (energías totales
-        sí escalan con el número de átomos). La combinación mean+sum
-        captura ambas propiedades simultáneamente.
-        Referencia: Gilmer et al. (2017) MPNN for Quantum Chemistry.
-
-    CAMBIO 3 — Uso de edge_attr como bias de atención:
-        Las aristas del grafo molecular contienen distancias interatómicas.
-        Ignorarlas descarta información geométrica crucial: la energía de
-        interacción entre dos átomos depende fuertemente de su distancia.
-        Ahora se proyectan a un escalar de bias que se suma al score de
-        atención antes del softmax.
-        Referencia: ViSNet (Wang et al., 2023).
-
-    CAMBIO 4 — RealProjection usa real + imag:
-        La proyección final ahora concatena parte real e imaginaria del
-        tensor complejo en lugar de descartar la imaginaria. Esto preserva
-        la información de fase en la predicción final.
-
-    CAMBIO 5 — 4 capas de atención (antes 2):
-        Más capas permiten que la información se propague entre átomos
-        que no son vecinos directos, capturando interacciones de largo
-        alcance. SchNet usa 6 capas de interacción. Referencia: [14].
-
-    CAMBIO 6 — LayerNorm activado entre capas:
-        Con 4 capas, las magnitudes complejas pueden crecer o colapsar
-        sin normalización. LayerNorm estabiliza el entrenamiento profundo.
-        Referencia: Ba et al. (2016) Layer Normalization.
-
-    CAMBIO 7 — Cutoff suave por distancia en EdgeBias:
-        EdgeBiasProjection ahora aprende una penalización proporcional
-        a la distancia interatómica, con parámetro dist_scale inicializado
-        negativo. Átomos lejanos reciben bias negativo → menos atención.
-        Equivalente funcional al envelope de SchNet. Referencia: [14].
-
-    Args:
-        in_dim:           dimensión de atom_types (ej: 5)
-        hidden_dim:       dimensión del espacio latente complejo
-        out_dim:          número de propiedades a predecir (ej: 1)
-        num_hidden_layers: capas de atención apiladas (default 4)
-        edge_dim:         dimensión de edge_attr (default 4)
-        dropout:          dropout entre capas (default 0.1)
-        use_residuals:    conexiones residuales entre capas (default True)
-        use_layernorm:    LayerNorm sobre magnitud entre capas (default True)
+    Versión corregida para v7:
+    - RBFExpansion usa distancias reales en Å desde edge_attr[:, 0].
+    - cutoff del modelo debe coincidir con max_radius del dataset.
+    - forward robusto ante edge_index/edge_attr None o tensores vacíos.
     """
 
     def __init__(
         self,
-        in_dim: int,
-        hidden_dim: int,
+        in_dim: int = 5,
+        hidden_dim: int = 256,
         out_dim: int = 1,
-        num_hidden_layers: int = 4,
-        edge_dim: int = 4,
+        num_hidden_layers: int = 3,
+        num_rbf: int = 50,
+        cutoff: float = 5.0,
+        edge_dim: int = 4,  # conservado por compatibilidad; internamente se usa num_rbf
         dropout: float = 0.1,
         use_residuals: bool = True,
         use_layernorm: bool = True,
-        **kwargs,   # compatibilidad con YAML
+        activation: str = "modrelu",
+        modrelu_init_bias: float = -0.1,
+        modrelu_eps: float = 1e-8,
+        use_angular: bool = False,
+        num_angle_basis: int = 16,
+        angular_scale_init: float = 0.1,
+        **kwargs,
     ):
         super().__init__()
 
-        self.hidden_dim = hidden_dim
-        self.use_residuals = use_residuals
-        self.use_layernorm = use_layernorm
-        self.num_hidden_layers = num_hidden_layers
+        self.hidden_dim = int(hidden_dim)
+        self.num_hidden_layers = int(num_hidden_layers)
+        self.num_rbf = int(num_rbf)
+        self.cutoff = float(cutoff)
+        self.use_residuals = bool(use_residuals)
+        self.use_layernorm = bool(use_layernorm)
+        self.activation_name = str(activation).lower().strip()
+        self.use_angular = bool(use_angular)
+        self.num_angle_basis = int(num_angle_basis)
+        self.angular_scale_init = float(angular_scale_init)
+        self.input_dim = int(in_dim) + 3  # atom_types + coordenadas esféricas (r, theta, phi)
 
-        # Entrada total = atom_types + (r, θ, φ)
-        self.input_dim = in_dim + 3
+        self.rbf = RBFExpansion(num_rbf=self.num_rbf, cutoff=self.cutoff)
+        self.embedding = ComplexEmbedding(self.input_dim, self.hidden_dim)
 
-        # Embedding complejo inicial
-        self.embedding = ComplexEmbedding(
-            in_dim=self.input_dim,
-            hidden_dim=hidden_dim,
-        )
+        if self.activation_name == "modrelu":
+            self.input_activation = ModReLU(
+                self.hidden_dim,
+                init_bias=float(modrelu_init_bias),
+                eps=float(modrelu_eps),
+            )
+            self.complex_activations = nn.ModuleList([
+                ModReLU(
+                    self.hidden_dim,
+                    init_bias=float(modrelu_init_bias),
+                    eps=float(modrelu_eps),
+                )
+                for _ in range(self.num_hidden_layers)
+            ])
+        elif self.activation_name in {"identity", "none", "linear"}:
+            self.input_activation = nn.Identity()
+            self.complex_activations = nn.ModuleList([nn.Identity() for _ in range(self.num_hidden_layers)])
+        else:
+            raise ValueError(
+                f"activation no soportada: {activation}. Usa 'modrelu' o 'identity'."
+            )
 
-        # Capas de atención apiladas
-        # Cada capa recibe edge_dim para el bias de aristas (CAMBIO 3)
         self.attn_layers = nn.ModuleList([
-            ComplexPolarAttention(hidden_dim=hidden_dim, edge_dim=edge_dim)
-            for _ in range(num_hidden_layers)
+            ComplexPolarAttention(hidden_dim=self.hidden_dim, edge_dim=self.num_rbf)
+            for _ in range(self.num_hidden_layers)
         ])
 
-        # LayerNorm sobre magnitud (opcional, aplicado entre capas)
-        if use_layernorm:
+        self.mp_layers = nn.ModuleList([
+            ComplexMessagePassing(
+                hidden_dim=self.hidden_dim,
+                edge_dim=self.num_rbf,
+                use_angular=self.use_angular,
+                num_angle_basis=self.num_angle_basis,
+                angular_scale_init=self.angular_scale_init,
+            )
+            for _ in range(self.num_hidden_layers)
+        ])
+
+        if self.use_layernorm:
             self.layer_norms = nn.ModuleList([
-                nn.LayerNorm(hidden_dim) for _ in range(num_hidden_layers)
+                nn.LayerNorm(self.hidden_dim) for _ in range(self.num_hidden_layers)
             ])
         else:
             self.layer_norms = None
 
-        # Dropout entre capas
         self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
+        self.out_proj = RealProjection(self.hidden_dim, self.hidden_dim)
 
-        # CAMBIO 2 — pooling mean+sum: la capa de salida recibe
-        # concatenación de mean y sum → input_dim = hidden_dim * 2 * 2
-        # (hidden_dim*2 porque RealProjection ya concatena real+imag,
-        #  y luego mean+sum duplica eso)
-        pool_dim = hidden_dim * 2       # mean + sum concatenados (cada uno = hidden_dim)
-
+        pool_dim = self.hidden_dim * 2
         self.out_head = nn.Sequential(
-            nn.Linear(pool_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, out_dim),
+            nn.Linear(pool_dim, self.hidden_dim),
+            ShiftedSoftplus(),
+            nn.Dropout(p=dropout / 2),
+            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+            ShiftedSoftplus(),
+            nn.Linear(self.hidden_dim // 2, out_dim),
         )
 
-        # Proyección complejo → real por átomo
-        # (hidden_dim * 2 por concatenar real+imag — CAMBIO 4)
-        self.out_proj = RealProjection(hidden_dim, hidden_dim)
+    @staticmethod
+    def _as_list_or_default(value, n_items):
+        if value is None:
+            return [None] * n_items
+        return value
+
+    @staticmethod
+    def _has_edges(edge_index, edge_attr):
+        return (
+            edge_index is not None
+            and edge_attr is not None
+            and isinstance(edge_index, torch.Tensor)
+            and isinstance(edge_attr, torch.Tensor)
+            and edge_index.numel() > 0
+            and edge_attr.numel() > 0
+        )
 
     def forward(self, batch: dict) -> torch.Tensor:
-        """
-        Args:
-            batch: dict con claves
-                - atom_types:       List[Tensor (N_i, in_dim)]
-                - coords_spherical: List[Tensor (N_i, 3)]
-                - edge_index:       List[Tensor (2, E_i)]
-                - edge_attr:        List[Tensor (E_i, edge_dim)]
-        Returns:
-            Tensor [B, out_dim]
-        """
-        atom_feats  = batch["atom_types"]
-        coords_sph  = batch["coords_spherical"]
-        edge_index  = batch.get("edge_index", [None] * len(atom_feats))
-        edge_attr   = batch.get("edge_attr",  [None] * len(atom_feats))
+        atom_feats = batch["atom_types"]
+        coords_sph = batch["coords_spherical"]
+        coords_cart = self._as_list_or_default(batch.get("coords_cart"), len(atom_feats))
+
+        edge_index_list = self._as_list_or_default(batch.get("edge_index"), len(atom_feats))
+        edge_attr_list = self._as_list_or_default(batch.get("edge_attr"), len(atom_feats))
 
         mol_outputs = []
 
-        for feats, sph, ei, ea in zip(atom_feats, coords_sph, edge_index, edge_attr):
-            # feats: [N, in_dim]  sph: [N, 3]  ei: [2, E]  ea: [E, edge_dim]
+        for feats, sph, cart, ei, ea in zip(atom_feats, coords_sph, coords_cart, edge_index_list, edge_attr_list):
+            x = torch.cat([feats.float(), sph.float()], dim=-1)
+            z = self.input_activation(self.embedding(x))
 
-            # Si edge_attr tiene dim distinta a la esperada, dar error claro
-            if ea is not None and ea.dim() == 2:
-                actual_dim = ea.shape[-1]
-                expected_dim = self.attn_layers[0].edge_bias.proj[0].in_features
-                if actual_dim != expected_dim:
-                    raise ValueError(
-                        f"edge_attr tiene {actual_dim} features por arista pero el modelo "
-                        f"fue construido con edge_dim={expected_dim}. "
-                        f"Ajusta edge_dim: {actual_dim} en el YAML."
-                    )
+            if self._has_edges(ei, ea):
+                rbf = self.rbf(ea.float())
+            else:
+                ei = None
+                rbf = None
 
-            # Concatenar features químicas y coordenadas polares
-            x = torch.cat([feats.float(), sph.float()], dim=-1)  # [N, in_dim+3]
+            for layer_idx in range(self.num_hidden_layers):
+                z_new = self.attn_layers[layer_idx](z, edge_index=ei, rbf=rbf)
 
-            # Embedding complejo inicial
-            z = self.embedding(x)   # ComplexTensor [N, D]
+                if ei is not None and rbf is not None:
+                    z_new = self.mp_layers[layer_idx](z_new, ei, rbf, coords_cart=cart)
 
-            # Capas de atención apiladas con residual opcional
-            for layer_idx, attn in enumerate(self.attn_layers):
-
-                z_new = attn(z, edge_index=ei, edge_attr=ea)
-
-                # CAMBIO 1 implícito: el scaling sqrt(D) está dentro de attn
-
-                # Conexión residual (CAMBIO arquitectural del YAML)
                 if self.use_residuals:
                     z_new.magnitude = z_new.magnitude + z.magnitude
-                    z_new.phase     = z_new.phase     + z.phase
+                    z_new.phase = z_new.phase + z.phase
 
-                # LayerNorm opcional sobre magnitud
                 if self.use_layernorm and self.layer_norms is not None:
                     z_new.magnitude = self.layer_norms[layer_idx](z_new.magnitude)
 
-                # Dropout sobre magnitud
+                z_new = self.complex_activations[layer_idx](z_new)
                 z_new.magnitude = self.dropout(z_new.magnitude)
-
                 z = z_new
 
-            # Proyección por átomo: ComplexTensor → real [N, hidden_dim]
-            atom_repr = self.out_proj(z)   # [N, hidden_dim]
-
-            # CAMBIO 2 — Pooling mean + sum concatenados
-            pool_mean = atom_repr.mean(dim=0)   # [hidden_dim]
-            pool_sum  = atom_repr.sum(dim=0)    # [hidden_dim]
-            mol_repr  = torch.cat([pool_mean, pool_sum], dim=-1)  # [hidden_dim*2]
-
+            atom_repr = self.out_proj(z)
+            mol_repr = torch.cat([atom_repr.mean(dim=0), atom_repr.sum(dim=0)], dim=-1)
             mol_outputs.append(mol_repr)
 
-        # Stack y predicción final
-        mol_batch = torch.stack(mol_outputs)          # [B, hidden_dim*2]
-        out = self.out_head(mol_batch)                # [B, out_dim]
-        return out
+        return self.out_head(torch.stack(mol_outputs))

@@ -1,27 +1,32 @@
 {
-  "model": "checkpoints/best_model.pt",
+  "model": "checkpoints_v9_angular_modrelu/best_model.pt",
   "sdf": "data/qm9.sdf",
   "csv": "data/qm9.csv",
   "target": "u0_atom",
-  "split_file": "logs/split_seed42.json",
+  "split_file": "logs_v9_angular_modrelu/split_seed42.json",
   "split": "test",
+  "unit": "kcal",
   "batch_size": 16,
   "num_samples": 12197,
+  "cutoff": 7.0,
+  "num_rbf": 300,
+  "normalize_target": true,
+  "per_atom_norm": true,
   "metrics": {
-    "mse": 15.884859085083008,
-    "rmse": 3.9855813986271826,
-    "mae_raw": 2.918600559234619,
-    "mae_mev": 126.56249890354613,
-    "mae_kcal_mol": 2.918600559234619,
-    "r2": 0.9997231960296631
+    "mse": 2.425311326980591,
+    "rmse": 1.5573411081007882,
+    "mae_raw": 0.9228023886680603,
+    "mae_mev": 40.016498980805714,
+    "mae_kcal_mol": 0.9228023886680603,
+    "r2": 0.9999577403068542
   },
   "performance": {
-    "inference_total_sec": 216.77837289997842,
-    "inference_ms_per_sample": 17.773089522011844,
-    "samples_per_sec": 56.26483784721319,
-    "param_count": 1353223,
-    "model_size_mb": 5.162136077880859,
-    "peak_gpu_mem_mb": 22.38232421875
+    "inference_total_sec": 360.4026490000542,
+    "inference_ms_per_sample": 29.54846675412431,
+    "samples_per_sec": 33.84270352573952,
+    "param_count": 3007881,
+    "model_size_mb": 11.47415542602539,
+    "peak_gpu_mem_mb": 39.7685546875
   },
   "split_meta": {
     "seed": 42,
@@ -31,6 +36,15 @@
     "n_val": 10000,
     "n_test": 12197,
     "target": "u0_atom",
+    "cutoff": 7.0,
+    "max_radius": 7.0,
+    "num_rbf": 300,
+    "use_angular": true,
+    "num_angle_basis": 24,
+    "per_atom_norm": true,
+    "normalize_target": true,
+    "sample_size": null,
+    "sample_indices": null,
     "train_idx": [
       64446,
       25784,
@@ -132235,5 +132249,5 @@
       56941
     ]
   },
-  "timestamp": "2026-04-23 21:21:49"
+  "timestamp": "2026-06-08 11:33:12"
 }
