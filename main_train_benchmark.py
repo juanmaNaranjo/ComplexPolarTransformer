@@ -158,6 +158,7 @@ if __name__ == "__main__":
                 "num_rbf": int(model_cfg.get("num_rbf", 50)),
                 "use_angular": bool(model_cfg.get("use_angular", False)),
                 "num_angle_basis": int(model_cfg.get("num_angle_basis", 16)),
+                "geometry_mode": str(model_cfg.get("geometry_mode", "polar")),
                 "per_atom_norm": per_atom_norm,
                 "normalize_target": normalize_target,
                 "sample_size": sample_size,
