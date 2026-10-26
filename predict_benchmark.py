@@ -65,6 +65,8 @@ def extract_model_config(ckpt, defaults=None):
         "use_residuals": False,
         "use_layernorm": False,
         "activation": "modrelu",
+        "attention_type": "polar",
+        "attention_dropout": 0.0,
         "modrelu_init_bias": -0.1,
         "modrelu_eps": 1e-8,
         "use_angular": False,
@@ -96,6 +98,8 @@ def build_model_from_ckpt(ckpt, state_dict, allow_partial_load=False):
         use_residuals=bool(model_cfg.get("use_residuals", False)),
         use_layernorm=bool(model_cfg.get("use_layernorm", False)),
         activation=str(model_cfg.get("activation", "modrelu")),
+        attention_type=str(model_cfg.get("attention_type", "polar")),
+        attention_dropout=float(model_cfg.get("attention_dropout", 0.0)),
         modrelu_init_bias=float(model_cfg.get("modrelu_init_bias", -0.1)),
         modrelu_eps=float(model_cfg.get("modrelu_eps", 1e-8)),
         use_angular=bool(model_cfg.get("use_angular", False)),
@@ -184,6 +188,7 @@ def predict(args):
     print(
         f"[INFO] Modelo reconstruido con cutoff={cutoff:.3f} Å | "
         f"num_rbf={num_rbf} | activation={model_cfg.get('activation', 'modrelu')} | "
+        f"attention_type={model_cfg.get('attention_type', 'polar')} | "
         f"use_angular={model_cfg.get('use_angular', False)} | "
         f"num_angle_basis={model_cfg.get('num_angle_basis', 16)}"
     )

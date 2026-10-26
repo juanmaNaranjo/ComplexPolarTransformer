@@ -5,6 +5,7 @@ from .complex_layers import (
     RBFExpansion,
     ComplexEmbedding,
     ComplexPolarAttention,
+    ComplexPolarQKVAttention,
     ComplexMessagePassing,
     RealProjection,
     ShiftedSoftplus,
@@ -35,6 +36,8 @@ class ComplexPolarTransformerBeta(nn.Module):
         use_residuals: bool = True,
         use_layernorm: bool = True,
         activation: str = "modrelu",
+        attention_type: str = "polar",
+        attention_dropout: float = 0.0,
         modrelu_init_bias: float = -0.1,
         modrelu_eps: float = 1e-8,
         use_angular: bool = False,
@@ -51,6 +54,8 @@ class ComplexPolarTransformerBeta(nn.Module):
         self.use_residuals = bool(use_residuals)
         self.use_layernorm = bool(use_layernorm)
         self.activation_name = str(activation).lower().strip()
+        self.attention_type = str(attention_type).lower().strip()
+        self.attention_dropout = float(attention_dropout)
         self.use_angular = bool(use_angular)
         self.num_angle_basis = int(num_angle_basis)
         self.angular_scale_init = float(angular_scale_init)
@@ -81,10 +86,24 @@ class ComplexPolarTransformerBeta(nn.Module):
                 f"activation no soportada: {activation}. Usa 'modrelu' o 'identity'."
             )
 
-        self.attn_layers = nn.ModuleList([
-            ComplexPolarAttention(hidden_dim=self.hidden_dim, edge_dim=self.num_rbf)
-            for _ in range(self.num_hidden_layers)
-        ])
+        if self.attention_type in {"polar", "original", "similarity"}:
+            self.attn_layers = nn.ModuleList([
+                ComplexPolarAttention(hidden_dim=self.hidden_dim, edge_dim=self.num_rbf)
+                for _ in range(self.num_hidden_layers)
+            ])
+        elif self.attention_type in {"qkv", "learned_qkv", "transformer"}:
+            self.attn_layers = nn.ModuleList([
+                ComplexPolarQKVAttention(
+                    hidden_dim=self.hidden_dim,
+                    edge_dim=self.num_rbf,
+                    attention_dropout=self.attention_dropout,
+                )
+                for _ in range(self.num_hidden_layers)
+            ])
+        else:
+            raise ValueError(
+                f"attention_type no soportado: {attention_type}. Usa 'polar' o 'qkv'."
+            )
 
         self.mp_layers = nn.ModuleList([
             ComplexMessagePassing(

@@ -1,0 +1,55 @@
+# experiments/beta_train_v11_qkv_attention_fast.yaml
+# Prueba rápida opcional para validar que la variante Q/K/V aprende antes
+# de entrenar sobre todo QM9. No reportar como métrica oficial.
+
+dataset:
+  sdf: "data/qm9.sdf"
+  csv: "data/qm9.csv"
+  target: "u0_atom"
+
+benchmark_split: false
+sample_size: 10000
+seed: 42
+
+batch_size: 8
+num_workers: 4
+learning_rate: 0.00008
+max_epochs: 30
+
+normalize_target: true
+per_atom_norm: true
+grad_clip: 0.25
+
+early_stopping:
+  patience: 10
+  min_delta: 0.00002
+
+scheduler:
+  name: reduce_on_plateau
+  factor: 0.5
+  patience: 5
+  min_lr: 1e-7
+
+ckpt_dir: "checkpoints_v11_qkv_attention_fast"
+log_dir: "logs_v11_qkv_attention_fast"
+split_path: "logs_v11_qkv_attention_fast/split_seed42.json"
+
+model:
+  in_dim: 5
+  hidden_dim: 384
+  out_dim: 1
+  num_hidden_layers: 2
+  num_rbf: 300
+  cutoff: 7.0
+  edge_dim: 4
+  dropout: 0.04
+  use_residuals: true
+  use_layernorm: true
+  activation: "modrelu"
+  modrelu_init_bias: -0.08
+  modrelu_eps: 1e-8
+  attention_type: "qkv"
+  attention_dropout: 0.0
+  use_angular: true
+  num_angle_basis: 24
+  angular_scale_init: 0.1
