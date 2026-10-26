@@ -1,0 +1,47 @@
+{
+  "model": "checkpoints_v9_angular_modrelu/best_model.pt",
+  "checkpoint_epoch": 144,
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+  "batch_size": 16,
+  "n": 12197,
+  "control": {
+    "mae_kcal_mol": 0.9228028059005737,
+    "rmse_kcal_mol": 1.5573414142874733,
+    "r2": 0.9999577403068542,
+    "end_to_end_sec": 794.2654926999239,
+    "end_to_end_ms_per_molecule": 65.11974196113175
+  },
+  "latency_forward_only": {
+    "n_molecules": 12197,
+    "repeats": 3,
+    "total_sec_median": 681.0462561000604,
+    "ms_per_molecule_median": 55.83719407231782,
+    "ms_per_molecule_min": 48.570567910146615,
+    "molecules_per_sec_median": 17.9092093829938,
+    "share_of_end_to_end_pct": 85.7454166597367
+  },
+  "permute": {
+    "mae_kcal_mol": 0.9228042364120483,
+    "rmse_kcal_mol": 1.5573430217665818,
+    "r2": 0.9999577403068542,
+    "elapsed_sec": 677.033774600015,
+    "mae_change_pct": 0.0001550181106368953,
+    "pred_shift_mean_kcal_mol": 2.52707668551011e-05,
+    "pred_shift_median_kcal_mol": 0.0,
+    "pred_shift_p99_kcal_mol": 0.000244140625,
+    "pred_shift_max_kcal_mol": 0.0255126953125
+  },
+  "reflect": {
+    "mae_kcal_mol": 0.9400126338005066,
+    "rmse_kcal_mol": 1.5392482277589068,
+    "r2": 0.9999586939811707,
+    "elapsed_sec": 663.735545399948,
+    "mae_change_pct": 1.86495183910258,
+    "pred_shift_mean_kcal_mol": 0.33816421031951904,
+    "pred_shift_median_kcal_mol": 0.263427734375,
+    "pred_shift_p99_kcal_mol": 1.3446044921874971,
+    "pred_shift_max_kcal_mol": 15.6572265625
+  },
+  "timestamp": "2026-10-25 21:43:34"
+}

@@ -11,6 +11,12 @@ complex-polar-env/
 data/
 *.sdf
 *.csv
+# Excepción: registros de entrenamiento y predicciones/resultados de evaluación
+# que respaldan las cifras de la tesis (pequeños y necesarios para verificarlas)
+!logs_*/training_log.csv
+!results/predictions_v9_angular_modrelu.csv
+!results/subset_eval_v9/*.csv
+!results/rotation_robustness/*.csv
 *.pt
 *.pth
 *.ckpt

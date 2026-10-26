@@ -1,0 +1,65 @@
+# experiments/beta_train_v10_angular_fast.yaml
+# v10 fast: angular explícito más eficiente
+# Objetivo: mejorar v9 sin aumentar excesivamente el tiempo de entrenamiento
+
+dataset:
+  sdf: "data/qm9.sdf"
+  csv: "data/qm9.csv"
+  target: "u0_atom"
+
+benchmark_split: true
+sample_size: null
+seed: 42
+
+# Subimos batch para reducir pasos por época.
+# Tu GPU estaba usando menos de 1 GB, así que hay margen.
+batch_size: 32
+num_workers: 8
+
+learning_rate: 0.00007
+max_epochs: 350
+
+normalize_target: true
+per_atom_norm: true
+grad_clip: 0.25
+
+early_stopping:
+  patience: 55
+  min_delta: 0.00002
+
+scheduler:
+  name: reduce_on_plateau
+  factor: 0.5
+  patience: 16
+  min_lr: 1e-7
+
+ckpt_dir: "checkpoints_v10_angular_fast"
+log_dir: "logs_v10_angular_fast"
+split_path: "logs_v10_angular_fast/split_seed42.json"
+
+model:
+  in_dim: 5
+  hidden_dim: 384
+  out_dim: 1
+
+  # Punto medio entre v9 y v10 pesada.
+  # v9 tenía 2 capas; aquí probamos 3.
+  num_hidden_layers: 3
+
+  # Mantener lo que funcionó en v9.
+  num_rbf: 300
+  cutoff: 7.0
+  edge_dim: 4
+
+  dropout: 0.05
+  use_residuals: true
+  use_layernorm: true
+
+  activation: "modrelu"
+  modrelu_init_bias: -0.08
+  modrelu_eps: 1e-8
+
+  # Punto medio entre 24 y 48.
+  use_angular: true
+  num_angle_basis: 36
+  angular_scale_init: 0.1

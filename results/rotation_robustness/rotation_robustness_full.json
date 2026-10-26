@@ -1,0 +1,63 @@
+{
+  "model": "checkpoints_v9_angular_modrelu/best_model.pt",
+  "split_file": "logs_v9_angular_modrelu/split_seed42.json",
+  "checkpoint_epoch": 144,
+  "rotation": "scipy Rotation.random (uniforme en SO(3)); semilla = seed*1000003 + idx_original",
+  "applied_before": "centrado en el centroide y conversión a coordenadas esféricas (QM9SDFDataset)",
+  "device": "cuda",
+  "batch_size": 16,
+  "dry_run": 0,
+  "runs": {
+    "control": {
+      "mae_kcal_mol": 0.9228026270866394,
+      "rmse_kcal_mol": 1.5573413377408076,
+      "r2": 0.9999577403068542,
+      "elapsed_sec": 494.93412530003116,
+      "n": 12197
+    },
+    "rot_seed_123": {
+      "mae_kcal_mol": 1.020034909248352,
+      "rmse_kcal_mol": 1.6945193496504316,
+      "r2": 0.9999499917030334,
+      "elapsed_sec": 493.5188927000854,
+      "n": 12197,
+      "edges_identical_to_control": true,
+      "pred_shift_mean_kcal_mol": 0.5836825966835022,
+      "pred_shift_median_kcal_mol": 0.4556884765625,
+      "pred_shift_p99_kcal_mol": 2.3503173828124977,
+      "pred_shift_max_kcal_mol": 13.841796875
+    },
+    "rot_seed_456": {
+      "mae_kcal_mol": 1.021348237991333,
+      "rmse_kcal_mol": 1.6729165513864797,
+      "r2": 0.9999512434005737,
+      "elapsed_sec": 519.9309113998897,
+      "n": 12197,
+      "edges_identical_to_control": true,
+      "pred_shift_mean_kcal_mol": 0.5812398791313171,
+      "pred_shift_median_kcal_mol": 0.4559326171875,
+      "pred_shift_p99_kcal_mol": 2.3003271484374848,
+      "pred_shift_max_kcal_mol": 11.331298828125
+    },
+    "rot_seed_789": {
+      "mae_kcal_mol": 1.0224754810333252,
+      "rmse_kcal_mol": 1.689276501899193,
+      "r2": 0.9999502897262573,
+      "elapsed_sec": 469.7880639999639,
+      "n": 12197,
+      "edges_identical_to_control": true,
+      "pred_shift_mean_kcal_mol": 0.5831770300865173,
+      "pred_shift_median_kcal_mol": 0.457275390625,
+      "pred_shift_p99_kcal_mol": 2.3842089843749985,
+      "pred_shift_max_kcal_mol": 11.8192138671875
+    }
+  },
+  "summary": {
+    "mae_control": 0.9228026270866394,
+    "mae_rot_mean": 1.0212862094243367,
+    "mae_rot_std": 0.00122146768960315,
+    "mae_ratio_mean": 1.106722260477972,
+    "pred_shift_mean_over_seeds": 0.5826998353004456
+  },
+  "timestamp": "2026-10-15 17:36:46"
+}
