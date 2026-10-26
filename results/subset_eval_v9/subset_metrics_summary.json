@@ -1,0 +1,53 @@
+{
+    "model": "ComplexPolarTransformer v9 angular explicito + modReLU",
+    "predictions_file": "results/predictions_v9_angular_modrelu.csv",
+    "test_samples_total": 12197,
+    "n_subsets": 5,
+    "seed": 42,
+    "subset_strategy": "random_disjoint_partition_of_original_test",
+    "metrics_by_subset": [
+        {
+            "subset": 1,
+            "n_samples": 2440,
+            "mae_kcal_mol": 0.9088027909836094,
+            "rmse_kcal_mol": 1.329077987140932,
+            "r2": 0.9999696309075586
+        },
+        {
+            "subset": 2,
+            "n_samples": 2440,
+            "mae_kcal_mol": 0.9367484139344261,
+            "rmse_kcal_mol": 1.9594602673125772,
+            "r2": 0.99993639360512
+        },
+        {
+            "subset": 3,
+            "n_samples": 2439,
+            "mae_kcal_mol": 0.9540004510045095,
+            "rmse_kcal_mol": 1.7557912038402346,
+            "r2": 0.9999433267947093
+        },
+        {
+            "subset": 4,
+            "n_samples": 2439,
+            "mae_kcal_mol": 0.8888459983599812,
+            "rmse_kcal_mol": 1.2088744705171734,
+            "r2": 0.9999749225433402
+        },
+        {
+            "subset": 5,
+            "n_samples": 2439,
+            "mae_kcal_mol": 0.9256148503485075,
+            "rmse_kcal_mol": 1.405753311139794,
+            "r2": 0.9999644728255768
+        }
+    ],
+    "summary": {
+        "mae_mean": 0.9228025009262067,
+        "mae_std": 0.025123424492896788,
+        "rmse_mean": 1.5317914479901422,
+        "rmse_std": 0.313978599243641,
+        "r2_mean": 0.999957749335261,
+        "r2_std": 1.6921680205006804e-05
+    }
+}

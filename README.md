@@ -234,3 +234,48 @@ El resultado anterior `MAE ≈ 2.919 kcal/mol` corresponde al código previo. De
 ```txt
 RBF×150 + cutoff real 7 Å + normalización per-atom exacta
 ```
+
+---
+
+## Pruebas de evaluación de v9 (tesis)
+
+Pruebas adicionales sobre el modelo **v9 angular explícito + modReLU** evaluado en la tesis. Ninguna reentrena: todas reutilizan el mismo checkpoint (época 144), la partición `logs_v9_angular_modrelu/split_seed42.json` y el pipeline de `QM9SDFDataset`.
+
+**Checkpoint:** `best_model.pt.zip` (en la raíz) es el checkpoint de v9 evaluado (pesos idénticos al `checkpoints_v9_angular_modrelu/best_model.pt` original). PyTorch lo carga sin descomprimir; pásalo con `--model best_model.pt.zip` o cópialo a `checkpoints_v9_angular_modrelu/best_model.pt`.
+
+| Script | Qué hace | GPU | Salida |
+|---|---|---|---|
+| `scripts/evaluate_test_subsets.py` | Métricas en 5 subconjuntos disjuntos del test | No | `results/subset_eval_v9/` |
+| `scripts/rotation_robustness_test.py` | Rotación SO(3) aleatoria de cada molécula (3 semillas) vs. control | Sí (~8 min/pasada) | `results/rotation_robustness/` |
+| `scripts/symmetry_latency_tests.py` | Permutación de átomos, reflexión x→−x y latencia de la red sola | Sí (~45 min) | `results/symmetry_latency/` |
+| `scripts/extra_analysis.py` | Tamaño molecular por partición, IC 95 % bootstrap y figuras de residuales | No | `results/extra_analysis/` |
+
+Ejecutar desde la raíz del repositorio (con `data/qm9.sdf` y `data/qm9.csv`):
+
+```bash
+python scripts/rotation_robustness_test.py --model best_model.pt.zip
+python scripts/symmetry_latency_tests.py --model best_model.pt.zip
+python scripts/extra_analysis.py
+python scripts/evaluate_test_subsets.py --predictions results/predictions_v9_angular_modrelu.csv
+```
+
+### Resultados (test, 12 197 moléculas)
+
+| Prueba | Resultado |
+|---|---|
+| Evaluación v9 | MAE 0.9228 kcal/mol (IC 95 % bootstrap [0.902, 0.946]), RMSE 1.5573, R² 0.999958 |
+| 5 subconjuntos | MAE 0.9228 ± 0.0251 kcal/mol |
+| Rotación SO(3) aleatoria | MAE 1.0213 ± 0.0012 (+10.7 %) → **no invariante a rotación** (θ, φ absolutos en el embedding) |
+| Reflexión x → −x | MAE 0.9400 (+1.9 %) → no invariante a reflexión |
+| Permutación de átomos | Invariante (cambio máx. 0.026 kcal/mol, ruido numérico) |
+| Moléculas ≤ 9 átomos en train | 242 de 110 000 (0.22 %); su MAE en test es 4.57 kcal/mol |
+| Latencia | La red sola es el 62–86 % del tiempo de inferencia (bucle Python por molécula en `forward`); varía entre sesiones (40.6–65.1 ms/molécula de extremo a extremo) |
+
+### Otros artefactos añadidos
+
+- `results/predictions_v9_angular_modrelu.csv`: predicciones de v9 por molécula (fuente de todas las métricas).
+- `logs_v9_angular_modrelu/training_log.csv`: registro de entrenamiento de v9 (234 épocas; mejor validación en la época 144).
+- `logs_v10_angular_*/`: registros de las 3 ejecuciones exploratorias de v10 (15–26 épocas, detenidas) y `hparams_from_checkpoint.json` con sus hiperparámetros reales. Usaron exactamente los mismos índices de train/val/test que v9 (los `split_seed42.json` solo difieren en el metadato `num_angle_basis`, por eso no se versionan).
+- `experiments/beta_train_v10_angular_fast.yaml`: configuración de la ejecución `v10_angular_fast`.
+
+> `.gitignore` excluye `*.csv`; se añadieron excepciones solo para los registros de entrenamiento y los CSV de resultados anteriores.

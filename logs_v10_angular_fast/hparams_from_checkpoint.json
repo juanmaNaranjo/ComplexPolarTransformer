@@ -1,0 +1,43 @@
+{
+  "fuente": "checkpoints_v10_angular_fast/best_model.pt (no versionado: *.pt en .gitignore)",
+  "best_epoch": 15,
+  "param_count_state_dict": 4203877,
+  "per_atom_norm": true,
+  "hparams": {
+    "model": {
+      "in_dim": 5,
+      "hidden_dim": 384,
+      "out_dim": 1,
+      "num_hidden_layers": 3,
+      "num_rbf": 300,
+      "cutoff": 7.0,
+      "edge_dim": 4,
+      "dropout": 0.05,
+      "use_residuals": true,
+      "use_layernorm": true,
+      "activation": "modrelu",
+      "modrelu_init_bias": -0.08,
+      "modrelu_eps": "1e-8",
+      "use_angular": true,
+      "num_angle_basis": 36,
+      "angular_scale_init": 0.1
+    },
+    "dataset": {
+      "sdf": "data/qm9.sdf",
+      "csv": "data/qm9.csv",
+      "target": "u0_atom"
+    },
+    "learning_rate": 7e-05,
+    "batch_size": 32,
+    "max_epochs": 350,
+    "seed": 42,
+    "num_workers": 8,
+    "target": "u0_atom",
+    "split_path": "logs_v10_angular_fast/split_seed42.json",
+    "benchmark_split": true,
+    "cutoff": 7.0,
+    "max_radius": 7.0,
+    "per_atom_norm": true,
+    "normalize_target": true
+  }
+}
