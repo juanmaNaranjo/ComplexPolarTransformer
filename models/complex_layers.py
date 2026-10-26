@@ -358,6 +358,114 @@ class ComplexPolarAttention(nn.Module):
         return ComplexTensor(new_mag, new_phase)
 
 
+class ComplexLinear(nn.Module):
+    """
+    Capa lineal compleja con pesos aprendibles reales e imaginarios.
+
+    Si z = x + i y y W = Wr + i Wi, entonces:
+        Wz = (Wr x - Wi y) + i (Wr y + Wi x)
+
+    La salida se devuelve como ComplexTensor en forma polar para mantener
+    compatibilidad con el resto de la arquitectura ComplexPolarTransformer.
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, bias: bool = True, eps: float = 1e-8):
+        super().__init__()
+        self.in_dim = int(in_dim)
+        self.out_dim = int(out_dim)
+        self.eps = float(eps)
+
+        self.wr = nn.Linear(self.in_dim, self.out_dim, bias=False)
+        self.wi = nn.Linear(self.in_dim, self.out_dim, bias=False)
+
+        if bias:
+            self.br = nn.Parameter(torch.zeros(self.out_dim))
+            self.bi = nn.Parameter(torch.zeros(self.out_dim))
+        else:
+            self.register_parameter("br", None)
+            self.register_parameter("bi", None)
+
+    def forward(self, cpx: ComplexTensor) -> ComplexTensor:
+        z = cpx.as_cartesian()
+        xr = z.real.float()
+        xi = z.imag.float()
+
+        yr = self.wr(xr) - self.wi(xi)
+        yi = self.wr(xi) + self.wi(xr)
+
+        if self.br is not None:
+            yr = yr + self.br
+            yi = yi + self.bi
+
+        magnitude = torch.sqrt(yr.pow(2) + yi.pow(2) + self.eps)
+        phase = torch.atan2(yi, yr)
+        return ComplexTensor(magnitude, phase)
+
+
+class ComplexPolarQKVAttention(nn.Module):
+    """
+    Atención compleja-polar tipo Transformer con Q/K/V aprendibles.
+
+    A diferencia de ComplexPolarAttention, esta variante aprende proyecciones
+    complejas para consultas, claves y valores:
+        Q = Wq(z), K = Wk(z), V = Wv(z)
+
+    El score se calcula como la parte real del producto interno complejo:
+        score_ij = Re(<Q_i, K_j>) / sqrt(d)
+
+    También conserva el sesgo de aristas basado en RBF para incorporar
+    información geométrica del grafo molecular.
+    """
+
+    def __init__(self, hidden_dim: int, edge_dim: int = 50, attention_dropout: float = 0.0):
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.scale = math.sqrt(self.hidden_dim)
+
+        self.q_proj = ComplexLinear(self.hidden_dim, self.hidden_dim)
+        self.k_proj = ComplexLinear(self.hidden_dim, self.hidden_dim)
+        self.v_proj = ComplexLinear(self.hidden_dim, self.hidden_dim)
+        self.out_proj = ComplexLinear(self.hidden_dim, self.hidden_dim)
+
+        self.edge_bias = EdgeBiasProjection(edge_dim, hidden_dim)
+        self.attn_dropout = nn.Dropout(attention_dropout) if attention_dropout > 0 else nn.Identity()
+
+    def forward(
+        self,
+        cpx: ComplexTensor,
+        edge_index: torch.Tensor = None,
+        rbf: torch.Tensor = None,
+    ) -> ComplexTensor:
+        q = self.q_proj(cpx)
+        k = self.k_proj(cpx)
+        v = self.v_proj(cpx)
+
+        qz = q.as_cartesian()
+        kz = k.as_cartesian()
+        vz = v.as_cartesian()
+
+        # score_ij = Re(sum_h q_i,h * conj(k_j,h)) / sqrt(d)
+        scores = (qz.unsqueeze(1) * torch.conj(kz.unsqueeze(0))).real.sum(dim=-1)
+        scores = scores / self.scale
+
+        if edge_index is not None and rbf is not None and edge_index.numel() > 0 and rbf.numel() > 0:
+            bias_vals = self.edge_bias(rbf)
+            src_idx, dst_idx = edge_index[0], edge_index[1]
+            scores = scores.clone()
+            scores[src_idx, dst_idx] += bias_vals
+
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+
+        out_real = torch.matmul(attn_weights, vz.real)
+        out_imag = torch.matmul(attn_weights, vz.imag)
+        out_z = torch.complex(out_real, out_imag)
+
+        out_cpx = ComplexTensor.from_cartesian(out_z)
+        out_cpx = self.out_proj(out_cpx)
+        return out_cpx
+
+
 class RealProjection(nn.Module):
     """Proyecta ComplexTensor a reales concatenando real + imag."""
 
