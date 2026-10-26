@@ -70,6 +70,7 @@ def extract_model_config(ckpt, defaults=None):
         "use_angular": False,
         "num_angle_basis": 16,
         "angular_scale_init": 0.1,
+        "geometry_mode": "polar",
     }
     model_cfg = defaults.copy()
 
@@ -101,6 +102,7 @@ def build_model_from_ckpt(ckpt, state_dict, allow_partial_load=False):
         use_angular=bool(model_cfg.get("use_angular", False)),
         num_angle_basis=int(model_cfg.get("num_angle_basis", 16)),
         angular_scale_init=float(model_cfg.get("angular_scale_init", 0.1)),
+        geometry_mode=str(model_cfg.get("geometry_mode", "polar")),
     )
 
     try:

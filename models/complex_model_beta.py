@@ -40,6 +40,7 @@ class ComplexPolarTransformerBeta(nn.Module):
         use_angular: bool = False,
         num_angle_basis: int = 16,
         angular_scale_init: float = 0.1,
+        geometry_mode: str = "polar",
         **kwargs,
     ):
         super().__init__()
@@ -54,7 +55,22 @@ class ComplexPolarTransformerBeta(nn.Module):
         self.use_angular = bool(use_angular)
         self.num_angle_basis = int(num_angle_basis)
         self.angular_scale_init = float(angular_scale_init)
-        self.input_dim = int(in_dim) + 3  # atom_types + coordenadas esféricas (r, theta, phi)
+
+        # geometry_mode controla qué geometría entra al embedding atómico inicial.
+        # - polar: atom_types + (r, theta, phi). Es la versión histórica, pero no es
+        #   estrictamente invariante a rotaciones globales.
+        # - invariant: atom_types + ||x_i - centro||/cutoff. Mantiene solo una
+        #   característica escalar invariante; la geometría fina entra por RBF y
+        #   ángulos internos j-i-k, que sí son invariantes a rotación.
+        self.geometry_mode = str(geometry_mode).lower().strip()
+        if self.geometry_mode in {"invariant", "invariant_center", "rot_invariant"}:
+            self.input_dim = int(in_dim) + 1
+        elif self.geometry_mode in {"polar", "spherical"}:
+            self.input_dim = int(in_dim) + 3
+        else:
+            raise ValueError(
+                f"geometry_mode no soportado: {geometry_mode}. Usa 'polar' o 'invariant'."
+            )
 
         self.rbf = RBFExpansion(num_rbf=self.num_rbf, cutoff=self.cutoff)
         self.embedding = ComplexEmbedding(self.input_dim, self.hidden_dim)
@@ -145,7 +161,20 @@ class ComplexPolarTransformerBeta(nn.Module):
         mol_outputs = []
 
         for feats, sph, cart, ei, ea in zip(atom_feats, coords_sph, coords_cart, edge_index_list, edge_attr_list):
-            x = torch.cat([feats.float(), sph.float()], dim=-1)
+            feats = feats.float()
+            if self.geometry_mode in {"invariant", "invariant_center", "rot_invariant"}:
+                if cart is None:
+                    # Fallback defensivo: usar solo r de coordenadas esféricas si no llegó coords_cart.
+                    r_center = sph.float()[:, :1]
+                else:
+                    # coords_cart ya viene centrado en el dataset. Su norma es invariante
+                    # ante rotaciones globales de la molécula.
+                    r_center = torch.norm(cart.float(), dim=-1, keepdim=True)
+                r_center = r_center / max(float(self.cutoff), 1e-8)
+                x = torch.cat([feats, r_center], dim=-1)
+            else:
+                x = torch.cat([feats, sph.float()], dim=-1)
+
             z = self.input_activation(self.embedding(x))
 
             if self._has_edges(ei, ea):

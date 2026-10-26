@@ -1,0 +1,64 @@
+# experiments/beta_train_v11_invariant_angular.yaml
+# v11: prueba de invarianza rotacional estricta de entrada
+# Mantiene v9 angular + modReLU, pero elimina theta/phi del embedding inicial.
+# La geometría entra por distancias RBF + ángulos internos j-i-k, ambos invariantes a rotación.
+
+dataset:
+  sdf: "data/qm9.sdf"
+  csv: "data/qm9.csv"
+  target: "u0_atom"
+
+benchmark_split: true
+sample_size: null
+seed: 42
+
+batch_size: 32
+num_workers: 8
+learning_rate: 0.0001
+max_epochs: 350
+
+normalize_target: true
+per_atom_norm: true
+grad_clip: 0.25
+
+early_stopping:
+  patience: 55
+  min_delta: 0.00002
+
+scheduler:
+  name: reduce_on_plateau
+  factor: 0.5
+  patience: 16
+  min_lr: 1e-7
+
+ckpt_dir: "checkpoints_v11_invariant_angular"
+log_dir: "logs_v11_invariant_angular"
+split_path: "logs_v11_invariant_angular/split_seed42.json"
+
+model:
+  in_dim: 5
+  hidden_dim: 384
+  out_dim: 1
+
+  # Mantener la v9 eficiente.
+  num_hidden_layers: 2
+  num_rbf: 300
+  cutoff: 7.0
+  edge_dim: 4
+
+  dropout: 0.04
+  use_residuals: true
+  use_layernorm: true
+
+  activation: "modrelu"
+  modrelu_init_bias: -0.08
+  modrelu_eps: 1e-8
+
+  use_angular: true
+  num_angle_basis: 24
+  angular_scale_init: 0.1
+
+  # CAMBIO PRINCIPAL:
+  # polar     = atom_types + r,theta,phi; no estrictamente invariante
+  # invariant = atom_types + ||coords_cart||/cutoff; geometría fina por RBF + ángulos j-i-k
+  geometry_mode: "invariant"
